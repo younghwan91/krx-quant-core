@@ -1,0 +1,47 @@
+[project]
+name = "krx-quant-core"
+version = "0.1.0"
+description = "한국 주식(KOSPI·KOSDAQ) 퀀트 공통 코어 — 호가단위·가격제한폭·세션, 일자별 거래세 비용모델, 주문 가드, 공시 리스크 분류, 체결 시뮬레이션, Deflated Sharpe·purged CV 검증 통계"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11"
+authors = [{ name = "Younghwan Chae", email = "chyohw97@gmail.com" }]
+keywords = ["krx", "kospi", "kosdaq", "quant", "backtest", "trading", "kiwoom"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial :: Investment",
+]
+dependencies = [
+    # 호가단위 표의 정본은 kiwoom-client 에 있다 — 여기서 다시 정의하지 않는다.
+    "kiwoom-client>=0.4.0",
+    "numpy>=1.24",
+    "pandas>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff==0.16.2"]
+
+[project.urls]
+Homepage = "https://github.com/younghwan91/krx-quant-core"
+Repository = "https://github.com/younghwan91/krx-quant-core"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/krx_quant_core"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

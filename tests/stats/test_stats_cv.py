@@ -1,0 +1,278 @@
+"""stats.cv — swing-it ``tests/test_validation_wf.py`` 이식 (합성, DB 불요).
+
+핵심 과최적 방지 장치를 검증:
+  (1) rolling_folds 기본값이 swing-it frozen 6-fold 를 정확히 재현.
+  (2) fold 슬라이스가 no-lookahead — train 진입 < 경계, test 진입 >= 경계, 겹침 0.
+  (3) purge/embargo 는 TRAIN 에서만 빼고 TEST 창은 절대 줄이지 않는다.
+
+swing-it 의 ``_boot_lower``·``sensitivity_table`` 테스트는 그 함수들이 swing-it 에 남아
+여기 없다. 모듈 상수 ``FOLDS`` 도 core 에 없으므로 ``rolling_folds()`` 로 만든다.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from krx_quant_core.stats.cv import (
+    Fold,
+    entry_mask,
+    fold_consistency,
+    fold_slices,
+    oos_fixed,
+    purge_embargo,
+    rdist,
+    resolve_exit_dates,
+    rolling_folds,
+    slice_by_entry,
+    walk_forward,
+)
+
+FOLDS = rolling_folds()
+
+# 기존 연구 스크립트에 박혀있던 frozen 6-fold (train 3년 → test 1년, 마지막은 상한 연장).
+FROZEN = [
+    ("2017-01-01", "2020-01-01", "2020-01-01", "2021-01-01"),
+    ("2018-01-01", "2021-01-01", "2021-01-01", "2022-01-01"),
+    ("2019-01-01", "2022-01-01", "2022-01-01", "2023-01-01"),
+    ("2020-01-01", "2023-01-01", "2023-01-01", "2024-01-01"),
+    ("2021-01-01", "2024-01-01", "2024-01-01", "2025-01-01"),
+    ("2022-01-01", "2025-01-01", "2025-01-01", "2027-01-01"),
+]
+
+
+def test_rolling_folds_reproduces_frozen_set():
+    """생성기 기본 인자 == 기존 frozen 6-fold 튜플 (NamedTuple은 평범 튜플과 == 비교)."""
+    folds = rolling_folds()
+    assert len(folds) == 6
+    assert list(folds) == FROZEN
+
+
+def test_rolling_folds_generalizes():
+    """인자를 바꾸면 다른 window/기간의 fold를 만든다(생성기 일반성)."""
+    folds = rolling_folds(first_test_year=2021, last_test_year=2022,
+                          train_years=2, test_years=1, final_test_hi=None)
+    assert list(folds) == [
+        ("2019-01-01", "2021-01-01", "2021-01-01", "2022-01-01"),
+        ("2020-01-01", "2022-01-01", "2022-01-01", "2023-01-01"),
+    ]
+
+
+def test_fold_split_is_no_lookahead():
+    """각 fold: train_hi <= test_lo, train 진입 < 경계, test 진입 >= 경계, 겹침 0."""
+    # 각 fold의 train_hi 직전/직후에 진입일을 촘촘히 배치한 합성 진입 배열.
+    edates = np.array([
+        "2019-06-01", "2021-12-31", "2022-01-01", "2022-06-01", "2024-01-01",
+    ], dtype=object)
+    for f in FOLDS:
+        assert f.train_hi <= f.test_lo  # 학습 구간이 평가 구간보다 앞선다
+        tr = entry_mask(edates, f.train_lo, f.train_hi)
+        te = entry_mask(edates, f.test_lo, f.test_hi)
+        # train 진입은 모두 train_hi 미만, test 진입은 모두 test_lo 이상
+        assert all(d < f.train_hi for d in edates[tr])
+        assert all(d >= f.test_lo for d in edates[te])
+        # train_hi == test_lo이므로 두 구간은 절대 겹치지 않는다
+        assert not (tr & te).any()
+
+
+def test_slice_by_entry_matches_mask():
+    """slice_by_entry == entry_mask 적용 (no-lookahead 슬라이스 기본 연산)."""
+    rets = np.array([0.1, -0.2, 0.3, -0.4, 0.5])
+    edates = np.array(["2019-05-01", "2021-08-01", "2023-05-01",
+                       "2023-08-01", "2025-02-01"], dtype=object)
+    got = slice_by_entry(rets, edates, "2022-01-01", None)
+    assert set(np.round(got, 3)) == {0.3, -0.4, 0.5}
+    # train 쪽
+    got_tr = slice_by_entry(rets, edates, None, "2022-01-01")
+    assert set(np.round(got_tr, 3)) == {0.1, -0.2}
+
+
+def test_fold_slices_learns_theta_on_train_only():
+    """θ는 TRAIN feature 분위에서만 학습 → TEST에 적용. look-ahead 없음."""
+    fold = FOLDS[2]  # train 2019~2022, test 2022~2023
+    entry = np.array(["2020-01-01", "2020-06-01", "2020-09-01", "2021-01-01",
+                      "2021-06-01", "2022-03-01", "2022-06-01", "2022-09-01"],
+                     dtype=object)
+    feature = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.9, 0.05, 0.6])
+    value = np.array([1.0, -1.0, 2.0, -1.0, 3.0, 4.0, -1.0, 2.0])
+    out = fold_slices(entry, feature, value, fold, frac=0.5, min_train=3)
+    assert out is not None
+    theta, base, sel = out
+    # θ = TRAIN(5개 진입, feature 0.1~0.5)의 상위50% 분위 = 0.3
+    assert abs(theta - 0.3) < 1e-9
+    # base = TEST 전부(3개), sel = TEST 중 feature>=θ (0.9, 0.6 → 2개)
+    assert len(base) == 3
+    assert len(sel) == 2
+    # TRAIN 부족이면 None
+    assert fold_slices(entry, feature, value, fold, frac=0.5, min_train=99) is None
+
+
+def test_oos_fixed_evaluates_each_fold_test_window():
+    """oos_fixed는 fold마다 TEST 슬라이스의 stat을 낸다(고정 params 재최적화 없음)."""
+    # simulate: params 무시, 연도별로 다른 진입/수익 고정 반환.
+    edates = np.array([f"{y}-06-01" for y in range(2020, 2026)], dtype=object)
+    rets = np.array([0.1, 0.2, -0.3, 0.4, -0.5, 0.6])
+
+    def simulate(_params):
+        return rets, edates
+
+    arr = oos_fixed(FOLDS, simulate, {"any": 1})
+    assert len(arr) == len(FOLDS)
+    # 각 fold TEST에 진입 1건 → 그 수익이 기대값(마지막 fold는 2025~2027, 2025건만)
+    assert np.allclose(arr, [0.1, 0.2, -0.3, 0.4, -0.5, 0.6])
+
+
+def test_purge_removes_boundary_straddling_train_trade():
+    """경계를 걸친 트레이드(진입 TRAIN·실현 TEST)는 TRAIN에서 purge, TEST는 불변."""
+    fold = FOLDS[2]  # train 2019~2022, test 2022~2023 (train_hi == test_lo == 2022-01-01)
+    entry = np.array([
+        "2021-06-01",   # 0 TRAIN, 잘 앞선 실현 → 유지
+        "2021-12-20",   # 1 TRAIN 진입인데 실현이 TEST로 넘어감 → purge
+        "2022-06-01",   # 2 TEST
+    ], dtype=object)
+    # (a) 명시적 exit_dates
+    exit_dates = np.array(["2021-06-10", "2022-01-10", "2022-06-20"], dtype=object)
+    m = purge_embargo(entry, fold, exit_dates=exit_dates)
+    assert list(m.train) == [True, False, False]  # 0 유지·1 purge·2 는 TEST(TRAIN 아님)
+    assert list(m.test) == [False, False, True]  # TEST 창은 그대로
+    # (b) max_hold 로도 동일: 진입 2021-12-20 + 30달력일 = 2022-01-19 >= test_lo
+    m2 = purge_embargo(entry, fold, max_hold=30)
+    assert list(m2.train) == [True, False, False]
+    assert list(m2.test) == [False, False, True]
+    # 실현이 경계 못 넘으면(짧은 보유) purge 안 함
+    m3 = purge_embargo(entry, fold, max_hold=1)
+    assert list(m3.train) == [True, True, False]
+
+
+def test_embargo_drops_train_trades_in_pre_test_buffer():
+    """embargo_days>0 이면 test_lo 직전 완충구간 진입 TRAIN 제거(실현이 경계 전이어도)."""
+    fold = FOLDS[2]  # test_lo == 2022-01-01
+    entry = np.array([
+        "2021-06-01",   # 0 완충 밖 → 유지
+        "2021-12-20",   # 1 [2021-12-02, 2022-01-01) 완충 안 → 제거
+        "2022-06-01",   # 2 TEST(embargo는 TRAIN만 건드림)
+    ], dtype=object)
+    # 실현이 전부 경계 이전이라 purge 단독으론 아무것도 안 빠진다.
+    exit_dates = np.array(["2021-06-05", "2021-12-25", "2022-06-10"], dtype=object)
+    base = purge_embargo(entry, fold, exit_dates=exit_dates, embargo_days=0)
+    assert list(base.train) == [True, True, False]  # embargo 0 → 완충 없음
+    m = purge_embargo(entry, fold, exit_dates=exit_dates, embargo_days=30)
+    # embargo_lo = 2022-01-01 - 30d = 2021-12-02; 진입 2021-12-20 >= 그것 → 제거
+    assert list(m.train) == [True, False, False]
+    assert list(m.test) == [False, False, True]  # TEST 평가창 불변
+
+
+def test_purge_embargo_default_reproduces_entry_mask():
+    """기본(exit/max_hold 없음·embargo 0)은 entry_mask 소속을 정확히 재현(회귀 고정)."""
+    edates = np.array([
+        "2019-06-01", "2021-12-31", "2022-01-01", "2022-06-01", "2024-01-01",
+        "2025-06-01",
+    ], dtype=object)
+    for f in FOLDS:
+        m = purge_embargo(edates, f)
+        assert list(m.train) == list(entry_mask(edates, f.train_lo, f.train_hi))
+        assert list(m.test) == list(entry_mask(edates, f.test_lo, f.test_hi))
+
+
+# --- fold_slices 의 purge 배선 ---------------------------------------------
+#
+# purge_embargo 는 오래 전부터 있었지만 **아무 러너도 호출하지 않았다**(GUARDRAILS §4
+# 공백 1). θ 를 TRAIN 에서 학습하는 fold_slices 가 그게 필요한 자리다 — 경계 직전
+# 진입해 TEST 창에서 실현되는 트레이드가 TRAIN 에 남으면 라벨이 θ 로 스며든다.
+
+def _purge_fixture():
+    """TRAIN 경계(2022-01-01) 직전 진입 + 장기 보유 트레이드를 섞은 폴드."""
+    fold = Fold("2019-01-01", "2022-01-01", "2022-01-01", "2023-01-01")
+    entry = np.array(
+        ["2019-06-01"] * 40          # TRAIN 깊숙이 — 항상 남는다
+        + ["2021-12-20"] * 10        # TRAIN 이지만 보유하면 TEST 로 넘어간다
+        + ["2022-06-01"] * 20        # TEST
+    )
+    feature = np.concatenate([np.full(40, 1.0), np.full(10, 9.0), np.full(20, 1.0)])
+    value = np.concatenate([np.full(40, 0.1), np.full(10, 5.0), np.full(20, 0.2)])
+    return fold, entry, feature, value
+
+
+def test_fold_slices_purges_labels_that_spill_into_test():
+    fold, entry, feature, value = _purge_fixture()
+
+    plain = fold_slices(entry, feature, value, fold, 0.2, min_train=10)
+    purged = fold_slices(entry, feature, value, fold, 0.2, min_train=10, max_hold=30)
+    assert plain is not None and purged is not None
+
+    # 경계 직전 트레이드가 feature=9 로 θ 를 끌어올린다. purge 하면 사라져야 한다.
+    assert purged[0] < plain[0], "purge 후 θ 가 낮아져야 한다(누출 표본 제거)"
+
+
+def test_fold_slices_purge_never_shrinks_the_test_slice():
+    """OOS 지표는 절대 건드리지 않는다 — purge 는 TRAIN 에서만 뺀다."""
+    fold, entry, feature, value = _purge_fixture()
+    plain = fold_slices(entry, feature, value, fold, 0.2, min_train=10)
+    purged = fold_slices(entry, feature, value, fold, 0.2, min_train=10,
+                         max_hold=30, embargo_days=60)
+    np.testing.assert_array_equal(plain[1], purged[1])   # base(TEST 전체) 동일
+
+
+def test_fold_slices_without_purge_args_is_unchanged():
+    """기본 경로 무개입 — 발표 수치가 여기 고정돼 있다."""
+    fold, entry, feature, value = _purge_fixture()
+    a = fold_slices(entry, feature, value, fold, 0.2, min_train=10)
+    b = fold_slices(entry, feature, value, fold, 0.2, min_train=10,
+                    exit_dates=None, max_hold=None, embargo_days=0)
+    assert a[0] == b[0]
+    np.testing.assert_array_equal(a[1], b[1])
+    np.testing.assert_array_equal(a[2], b[2])
+
+
+def test_fold_consistency_forwards_purge_args():
+    fold, entry, feature, value = _purge_fixture()
+    out = fold_consistency(entry, feature, value, [fold], 0.2,
+                           min_train=10, min_sel=1, max_hold=30)
+    assert out["valid"] == 1, "purge 후에도 폴드가 유효해야 한다"
+
+
+# --- core 에서 추가한 경계 ---------------------------------------------------------
+
+def test_resolve_exit_dates_rejects_both_and_negative():
+    entry = np.array(["2022-01-01"], dtype=object)
+    with pytest.raises(ValueError):
+        resolve_exit_dates(entry, exit_dates=entry, max_hold=3)
+    with pytest.raises(ValueError):
+        resolve_exit_dates(entry, max_hold=-1)
+    with pytest.raises(ValueError):
+        purge_embargo(entry, FOLDS[0], embargo_days=-1)
+    assert resolve_exit_dates(entry)[0] == np.datetime64("2022-01-01")
+
+
+def test_walk_forward_fits_on_train_bounds_only():
+    edates = np.array([f"{y}-06-01" for y in range(2017, 2026)], dtype=object)
+    seen = []
+
+    def fit(lo, hi):
+        seen.append((lo, hi))
+        return {"k": hi}
+
+    def simulate(params):
+        return np.arange(len(edates), dtype=float), edates
+
+    recs = walk_forward(FOLDS, simulate, fit)
+    assert seen == [(f.train_lo, f.train_hi) for f in FOLDS]
+    first = recs[0]
+    assert first["params"] == {"k": "2020-01-01"}
+    assert first["is"] == pytest.approx(1.0)   # 2017·2018·2019 → 0,1,2 평균
+    assert first["oos"] == pytest.approx(3.0)  # 2020 → 3
+
+
+def test_rdist_fields_and_empty():
+    r = rdist(np.array([-1.0, 4.0, 2.0]))
+    assert r["n"] == 3 and r["tail3"] == pytest.approx(1 / 3)
+    assert r["payoff"] == pytest.approx(3.0)
+    assert np.isnan(rdist(np.array([]))["expR"])
+
+
+def test_fold_consistency_marks_train_short_and_sparse():
+    fold, entry, feature, value = _purge_fixture()
+    short = fold_consistency(entry, feature, value, [fold], 0.2, min_train=999)
+    assert short["rows"][0]["status"] == "train_short" and short["valid"] == 0
+    sparse = fold_consistency(entry, feature, value, [fold], 0.2, min_train=10, min_sel=999)
+    assert sparse["rows"][0]["status"] == "sparse"
