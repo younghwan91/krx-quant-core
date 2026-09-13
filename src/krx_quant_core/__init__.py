@@ -5,4 +5,4 @@ scalp-it(스캘핑)·daytrade-it(데이트레이딩)·swing-it(스윙 리서치)
 전략 로직은 여기에 두지 않는다.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

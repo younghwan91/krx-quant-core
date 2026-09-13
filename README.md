@@ -28,7 +28,7 @@ Deflated Sharpe·purged CV 검증 통계를 한 패키지로 묶었다.
 ## 설치
 
 ```bash
-pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.1.0"
+pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.1.1"
 # PyPI 릴리스 전까지는 git 태그로 고정한다.
 ```
 
