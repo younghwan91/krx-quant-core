@@ -123,7 +123,9 @@ def check(
     doc = Path(lock["doc"])
     doc_full = doc if doc.is_absolute() else Path(repo_root) / doc
     if not doc_full.exists() or _sha256(doc_full) != lock["sha256"]:
-        raise RunRefused(f"{label}: preregistration doc {lock['doc']} changed or missing since lock")
+        raise RunRefused(
+            f"{label}: preregistration doc {lock['doc']} changed or missing since lock"
+        )
     _write_new(
         d / "FINAL.lock",
         {"run_id": run_id, "ts": now_kst().isoformat(), "git_sha": _head_or_none(repo_root)},

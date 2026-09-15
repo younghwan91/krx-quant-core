@@ -36,8 +36,20 @@ def git_head(repo: Path | str) -> str:
 
 
 def git_dirty(repo: Path | str) -> bool:
-    """추적 중인 파일에 커밋 안 된 변경이 있나(추적 안 되는 새 파일은 무시)."""
-    return bool(_git(Path(repo), "status", "--porcelain", "--untracked-files=no").strip())
+    """추적 중인 파일에 커밋 안 된 변경이 있나.
+
+    추적 안 되는 새 파일과 ``research/runs``(실행 기록 자신 — 실행할 때마다 append 된다)는 무시한다.
+    """
+    out = _git(
+        Path(repo),
+        "status",
+        "--porcelain",
+        "--untracked-files=no",
+        "--",
+        ".",
+        ":(exclude)research/runs",
+    )
+    return bool(out.strip())
 
 
 def runs_root(repo_root: Path | str) -> Path:
