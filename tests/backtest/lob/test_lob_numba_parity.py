@@ -33,8 +33,22 @@ secs = np.arange(300, 22000, 7)
 hi = np.where(np.isfinite(F[:, 16]), F[:, 16] + 3, np.nan)
 r = simulate_exits(secs, F[:, 15], F[:, 16], F[:, 10], strength_drop=2.0, max_hold=15,
                    stop_ticks=3, take_ticks=6, hi=hi, latency=2, cost=0.0023)
+from test_lob_queue import _random_market
+from krx_quant_core.backtest.lob import QUEUE_MODELS, simulate_limit_orders
+book, tr, bid1, rng = _random_market(3)
+place = rng.integers(0, 380, 300)
+side = rng.choice([-1, 1], 300)
+price = np.where(side > 0, bid1[place] - rng.integers(0, 3, 300), bid1[place] + 1)
+qty = rng.integers(1, 400, 300).astype(float)
+lat = rng.integers(0, 3, 300)
+Q = {}
+for md in QUEUE_MODELS:
+    q = simulate_limit_orders(side, price, qty, place, book, tr, max_wait=30, latency=lat,
+                              queue_model=md, power=1.5)
+    for f in ("filled_qty", "avg_price", "taker_qty", "first_fill_sec", "done_sec", "status"):
+        Q[f"q_{md}_{f}"] = getattr(q, f)
 np.savez(sys.argv[1], have=HAVE_NUMBA, F=F, net5=lab["net5"], mfe60=lab["mfe60"],
-         net=r.net, hold=r.hold, reason=r.reason)
+         net=r.net, hold=r.hold, reason=r.reason, **Q)
 """
 
 
@@ -54,6 +68,9 @@ def test_numba_and_fallback_identical(tmp_path):
     fast = _run(tmp_path / "fast.npz", disable=False)
     slow = _run(tmp_path / "slow.npz", disable=True)
     assert bool(fast["have"]) and not bool(slow["have"])
-    for k in ("F", "net5", "mfe60", "net", "hold", "reason"):
+    assert any(k.startswith("q_") for k in fast)
+    for k in fast:
+        if k == "have":
+            continue
         np.testing.assert_array_equal(fast[k], slow[k], err_msg=k)
     assert set(np.unique(fast["reason"])) >= {1, 2, 3, 4}
