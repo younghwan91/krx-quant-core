@@ -99,8 +99,14 @@ def start_run(
     seed: int | None = None,
     final: bool = False,
     allow_dirty: bool = False,
+    trials_dir: Path | str | None = None,
 ) -> Iterator[Run]:
-    """게이트를 통과하면 기록을 시작하고 :class:`Run` 을 준다. 예외는 기록한 뒤 다시 던진다."""
+    """게이트를 통과하면 기록을 시작하고 :class:`Run` 을 준다. 예외는 기록한 뒤 다시 던진다.
+
+    ``trials_dir`` 는 시행 원장 폴더(기본 ``research/runs``). 이미 다른 곳(예 swing-it
+    ``research/logs``)에 원장을 쌓아 온 레포는 그 경로를 넘겨야 DSR 의 N 이 이어진다.
+    상대경로는 ``repo_root`` 기준.
+    """
     repo_root = Path(repo_root)
     d = label_dir(repo_root, label)
     try:
@@ -121,7 +127,12 @@ def start_run(
     if data is not None:
         oos.check(label, data.start, data.end, repo_root=repo_root, final=final, run_id=run_id)
 
-    logs_dir = runs_root(repo_root)
+    if trials_dir is None:
+        logs_dir = runs_root(repo_root)
+    else:
+        logs_dir = Path(trials_dir)
+        if not logs_dir.is_absolute():
+            logs_dir = repo_root / logs_dir
     record_trial(label, config, logs_dir=logs_dir)
     run = Run(label=label, run_id=run_id, dir=d, n_trials=count_trials(label, logs_dir=logs_dir))
     path = d / "RUNS.jsonl"
