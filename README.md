@@ -28,8 +28,8 @@ Deflated Sharpe·purged CV 검증 통계를 한 패키지로 묶었다.
 ## 설치
 
 ```bash
-pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.3.0"
-# 초 격자 호가 리플레이(backtest.lob)를 numba 로 가속하려면 extra 로: "krx-quant-core[fast] @ git+...@v0.3.0"
+pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.4.0"
+# 초 격자 호가 리플레이(backtest.lob)를 numba 로 가속하려면 extra 로: "krx-quant-core[fast] @ git+...@v0.4.0"
 # PyPI 릴리스 전까지는 git 태그로 고정한다.
 ```
 
@@ -47,7 +47,7 @@ krx_quant_core/
 ├── backtest/   호가 스윕 VWAP·왕복비용, 지정가 체결 규칙, 트레이드 원장 지표, 횡단면 시뮬
 │   └── lob/    틱·호가 → 초 격자 특징·경로, 배치=실시간 공용 커널, 에피소드 시뮬, 무작위 대조군, 지정가 대기열 모델
 ├── stats/      Deflated/Probabilistic Sharpe, t-haircut, purged walk-forward, 부트스트랩, 취약성
-└── runtime/    호스트 가드(백테스트는 simnode 에서만)
+└── runtime/    호스트 가드, 실행 기록 start_run, OOS 하드 잠금, kqc CLI(simnode 원격 실행)
 ```
 
 ```python
@@ -110,6 +110,30 @@ touch 가정은 체결률만 부풀리는 게 아니라 **역선택을 지운다
 데이터가 1초 절삭이라 초 미만 순서·지연은 모델링하지 않는다 — 가정 전체는 모듈 docstring.
 
 
+## 백테스트 실행 기반 (`runtime`, v0.4)
+
+백테스트는 **simnode 에서만** 돈다. 숫자마다 어디서·어떤 코드로·어떤 데이터로·몇 번째 시도로 나왔는지
+기계가 남긴다.
+
+```python
+from krx_quant_core.runtime import DataSpec, start_run
+
+with start_run("scalp84-flow", config, repo_root=ROOT,
+               data=DataSpec("2026-08-24", "2026-09-07", "train"), seed=84) as run:
+    ...
+    run.log_result({"mean_bp": -3.1, "n": 812, "dsr_trials": run.n_trials})
+```
+
+- 게이트: simnode 아님 · 추적 파일 미커밋 · 잠긴 OOS 구간 → `RunRefused`.
+- 기록: `research/runs/<label>/RUNS.jsonl`(정본, git) + `TRIALS.jsonl`(DSR 의 N 자동) + Postgres
+  `kqc_runs` 색인(`[db]` extra, 실패해도 실행 계속).
+- OOS: `kqc oos define` → `kqc prereg lock` → `start_run(..., final=True)` 는 label 당 **한 번**.
+
+```bash
+kqc run scalp-it -- uv run python scripts/x.py   # trader 에서: 푸시된 sha 를 simnode worktree 에서 실행
+kqc runs ls scalp84-flow --repo-root ~/git/scalp-it
+```
+
 ## 설계 원칙
 
 1. **이식은 수치 동일.** 소비 레포가 실매매일에 갈아탈 수 있어야 한다. 포트마다 원본
@@ -156,7 +180,7 @@ touch 가정은 체결률만 부풀리는 게 아니라 **역선택을 지운다
 ```bash
 uv sync --extra dev
 uv sync --extra dev --extra fast   # numba 경로까지
-uv run pytest -q        # 468 tests
+uv run pytest -q        # 498 tests
 uv run ruff check src tests
 ```
 

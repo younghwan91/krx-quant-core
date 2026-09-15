@@ -29,6 +29,9 @@ fast = ["numba>=0.60"]
 # 실행 기록 Postgres 색인(runtime.runindex). 없으면 JSONL 만 쓴다.
 db = ["psycopg[binary]>=3.1"]
 
+[project.scripts]
+kqc = "krx_quant_core.runtime.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/younghwan91/krx-quant-core"
 Repository = "https://github.com/younghwan91/krx-quant-core"
