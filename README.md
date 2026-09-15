@@ -28,8 +28,8 @@ Deflated Sharpe·purged CV 검증 통계를 한 패키지로 묶었다.
 ## 설치
 
 ```bash
-pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.2.0"
-# 초 격자 호가 리플레이(backtest.lob)를 numba 로 가속하려면 extra 로: "krx-quant-core[fast] @ git+...@v0.2.0"
+pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.3.0"
+# 초 격자 호가 리플레이(backtest.lob)를 numba 로 가속하려면 extra 로: "krx-quant-core[fast] @ git+...@v0.3.0"
 # PyPI 릴리스 전까지는 git 태그로 고정한다.
 ```
 
@@ -45,7 +45,7 @@ krx_quant_core/
 ├── execution/  키움 REST 주문 스펙, OrderIntent/OrderResult, OrderGuard(순수 가드)
 ├── risk/       DART 중대공시 분류·RiskGate, DartDisclosureDB, KillSwitch
 ├── backtest/   호가 스윕 VWAP·왕복비용, 지정가 체결 규칙, 트레이드 원장 지표, 횡단면 시뮬
-│   └── lob/    틱·호가 → 초 격자 특징·경로, 배치=실시간 공용 커널, 에피소드 시뮬, 무작위 대조군
+│   └── lob/    틱·호가 → 초 격자 특징·경로, 배치=실시간 공용 커널, 에피소드 시뮬, 무작위 대조군, 지정가 대기열 모델
 ├── stats/      Deflated/Probabilistic Sharpe, t-haircut, purged walk-forward, 부트스트랩, 취약성
 └── runtime/    호스트 가드(백테스트는 simnode 에서만)
 ```
@@ -81,6 +81,34 @@ r.net, r.hold, r.reason                          # 순수익·보유초·청산�
 
 실시간은 `SecondFeatureStream().update(...)` 를 초마다 부른다 — 배치와 같은 `step` 커널이다.
 체결 가정은 원본 그대로 낙관적이다(1호가 전량 체결, 잔량·대기열 무시).
+
+### 지정가 대기열 모델 (`backtest.lob.queue`, v0.3)
+
+`touch`/`through` 는 대기열 위치를 모를 때의 두 극단이다. 10단계 호가 스냅샷과 가격별 체결량으로
+**내 앞 잔량**을 추적한다(hftbacktest L2 모델 방식, MIT): `risk_averse`(취소는 전부 내 뒤),
+`prob_power`·`prob_log`(취소를 앞·뒤에 확률 배분). 도착 즉시 반대 호가 스윕, 부분 체결, 정수 초 지연.
+
+```python
+from krx_quant_core.backtest.lob import build_book_grid, build_level_trades, simulate_limit_orders
+
+book, trades = build_book_grid(quotes), build_level_trades(ticks)
+r = simulate_limit_orders(+1, book.bid_px[secs, 0], 10, secs, book, trades,
+                          max_wait=60, latency=1, queue_model="risk_averse")
+r.filled_qty, r.avg_price, r.status      # STATUS_FILLED / PARTIAL / CANCELED / NOT_PLACED
+```
+
+실데이터 점검(2026-09-10, 체결 많은 20종목, 30초마다 매수1호가 합류 10주, 최대 60초 대기):
+
+| 모델 | 체결률 | 체결 60초 뒤 마크아웃 |
+|---|---|---|
+| touch | 87.3% | **+3.2bp** |
+| prob_log | 71.0% | −4.2bp |
+| risk_averse | 70.4% | −4.6bp |
+| through | 61.4% | −9.4bp |
+
+touch 가정은 체결률만 부풀리는 게 아니라 **역선택을 지운다**(마크아웃 부호가 뒤집힌다).
+데이터가 1초 절삭이라 초 미만 순서·지연은 모델링하지 않는다 — 가정 전체는 모듈 docstring.
+
 
 ## 설계 원칙
 
@@ -128,7 +156,7 @@ r.net, r.hold, r.reason                          # 순수익·보유초·청산�
 ```bash
 uv sync --extra dev
 uv sync --extra dev --extra fast   # numba 경로까지
-uv run pytest -q        # 454 tests
+uv run pytest -q        # 468 tests
 uv run ruff check src tests
 ```
 
@@ -141,7 +169,7 @@ uv run ruff check src tests
   전송 계층은 실주문 대조 뒤에 합친다.
 - scalp-it `RiskGuard` 의 킬 판정을 `KillSwitch` 로 위임(대조 테스트는 이미 있음).
 - 이벤트 기반 일중 백테스트 엔진 — v0.2 에 초 격자 리플레이(`backtest.lob`)가 들어갔다. 남은 것:
-  지정가 대기열 위치·부분 체결 모델, ETF 호가단위(kiwoom-client 정본 추가 대기).
+  ETF 호가단위(kiwoom-client 정본 추가 대기). 대기열 모델은 실주문 체결로 보정할 것.
 - PyPI 릴리스.
 
 ## 라이선스
