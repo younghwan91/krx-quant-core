@@ -148,3 +148,14 @@ def test_read_runs_merges(repo):
     merged = runs.read_runs("a", repo_root=repo)
     assert [m["status"] for m in merged] == ["ok", "failed"]
     assert merged[0]["result"] == {"k": 1} and merged[0]["git_sha"]
+
+
+def test_trials_dir_keeps_existing_ledger(repo):
+    from krx_quant_core.stats.trials import record_trial
+
+    record_trial("a", {"old": 1}, logs_dir=repo / "research" / "logs")
+    with runs.start_run("a", CFG, repo_root=repo, trials_dir="research/logs") as run:
+        pass
+    assert run.n_trials == 2
+    assert not (label_dir(repo, "a") / "TRIALS.jsonl").exists()
+    assert _rows(repo, "a")[0]["n_trials"] == 2
