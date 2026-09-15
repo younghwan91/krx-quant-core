@@ -28,11 +28,13 @@ Deflated Sharpe·purged CV 검증 통계를 한 패키지로 묶었다.
 ## 설치
 
 ```bash
-pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.1.1"
+pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.2.0"
+# 초 격자 호가 리플레이(backtest.lob)를 numba 로 가속하려면 extra 로: "krx-quant-core[fast] @ git+...@v0.2.0"
 # PyPI 릴리스 전까지는 git 태그로 고정한다.
 ```
 
 Python ≥ 3.11. 의존성은 `kiwoom-client`(호가단위 표의 정본), `numpy`, `pandas` 뿐이다.
+선택 extra `fast` 는 `numba` 를 더한다 — 없으면 같은 커널을 파이썬으로 돌려 같은 숫자를 낸다.
 
 ## 모듈
 
@@ -43,6 +45,7 @@ krx_quant_core/
 ├── execution/  키움 REST 주문 스펙, OrderIntent/OrderResult, OrderGuard(순수 가드)
 ├── risk/       DART 중대공시 분류·RiskGate, DartDisclosureDB, KillSwitch
 ├── backtest/   호가 스윕 VWAP·왕복비용, 지정가 체결 규칙, 트레이드 원장 지표, 횡단면 시뮬
+│   └── lob/    틱·호가 → 초 격자 특징·경로, 배치=실시간 공용 커널, 에피소드 시뮬, 무작위 대조군
 ├── stats/      Deflated/Probabilistic Sharpe, t-haircut, purged walk-forward, 부트스트랩, 취약성
 └── runtime/    호스트 가드(백테스트는 simnode 에서만)
 ```
@@ -58,6 +61,26 @@ shift_ticks(49_950, 2)          # Decimal('50100') — 밴드 경계를 넘어�
 tax_rate(date(2025, 6, 2), Market.KOSPI).total   # Decimal('0.0015')
 round_trip_cost(date(2026, 9, 14), Market.KOSDAQ, slippage_one_way=0.0015)  # 0.0053
 ```
+
+### 초 격자 호가 리플레이 (`backtest.lob`, v0.2)
+
+scalp-it 80·81·82번에 흩어져 있던 틱·호가 리플레이를 옮겼다. 원본 `build_code`·
+`_strength_exit_labels`·`random_control` 사본과 합성 틱·호가로 대조해 **비트 단위 동일**
+(골든 테스트), numba 경로와 파이썬 폴백도 동일, 배치와 실시간 증분도 동일하다.
+
+```python
+from datetime import date
+from krx_quant_core.backtest.lob import build_second_grid, simulate_exits, random_entry_control
+
+feat, path = build_second_grid(ticks, quotes)     # 09:00~15:20 초 격자, 09:05~15:10 특징 행
+r = simulate_exits(feat.sec, path["bid"], path["ask"], path["strength"],
+                   strength_drop=3.0, max_hold=300,          # 82번 청산 규칙
+                   trade_date=date(2026, 9, 8), market="KOSDAQ")  # 비용 = round_trip_cost
+r.net, r.hold, r.reason                          # 순수익·보유초·청산사유(EXIT_*)
+```
+
+실시간은 `SecondFeatureStream().update(...)` 를 초마다 부른다 — 배치와 같은 `step` 커널이다.
+체결 가정은 원본 그대로 낙관적이다(1호가 전량 체결, 잔량·대기열 무시).
 
 ## 설계 원칙
 
@@ -104,7 +127,8 @@ round_trip_cost(date(2026, 9, 14), Market.KOSDAQ, slippage_one_way=0.0015)  # 0.
 
 ```bash
 uv sync --extra dev
-uv run pytest -q        # 437 tests
+uv sync --extra dev --extra fast   # numba 경로까지
+uv run pytest -q        # 454 tests
 uv run ruff check src tests
 ```
 
@@ -112,11 +136,12 @@ uv run ruff check src tests
 
 ## 로드맵
 
-- **v0.2** 키움 주문 HTTP 클라이언트 통합 — 지금은 scalp-it(원시 httpx)과 daytrade-it
+- **v0.3** 키움 주문 HTTP 클라이언트 통합 — 지금은 scalp-it(원시 httpx)과 daytrade-it
   (kiwoom-client 기반 `KiwoomBroker`)이 서로 다른 주문 스택을 쓴다. 가드·스펙은 공유했고
   전송 계층은 실주문 대조 뒤에 합친다.
 - scalp-it `RiskGuard` 의 킬 판정을 `KillSwitch` 로 위임(대조 테스트는 이미 있음).
-- 이벤트 기반 일중 백테스트 엔진(틱·호가 재생 + `fills` + `costs`).
+- 이벤트 기반 일중 백테스트 엔진 — v0.2 에 초 격자 리플레이(`backtest.lob`)가 들어갔다. 남은 것:
+  지정가 대기열 위치·부분 체결 모델, ETF 호가단위(kiwoom-client 정본 추가 대기).
 - PyPI 릴리스.
 
 ## 라이선스
