@@ -90,3 +90,21 @@ def test_oos_prereg_and_runs_subcommands(tmp_path, monkeypatch, capsys):
     assert cli.main(["runs", "ls", "lab", "--repo-root", root]) == 0
     out = capsys.readouterr().out
     assert "r1" in out and "ok" in out and "trials=3" in out and "mean_bp" in out
+
+
+def test_run_splits_command_at_double_dash(monkeypatch):
+    seen = {}
+
+    def fake_run(a):
+        seen["repo"], seen["ref"], seen["cmd"] = a.repo, a.ref, a.cmd
+        return 0
+
+    monkeypatch.setattr(cli, "_cmd_run", fake_run)  # _parser() 가 호출 시점에 전역을 읽는다
+    argv = ["run", "scalp-it", "--ref", SHA, "--", "uv", "run", "pytest", "--ref", "x"]
+    assert cli.main(argv) == 0
+    assert seen == {"repo": "scalp-it", "ref": SHA, "cmd": ["uv", "run", "pytest", "--ref", "x"]}
+
+
+def test_run_without_command_is_usage_error(capsys):
+    assert cli.main(["run", "scalp-it"]) == 2
+    assert "usage" in capsys.readouterr().err

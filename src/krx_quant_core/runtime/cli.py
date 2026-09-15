@@ -111,8 +111,8 @@ exit $rc
 def _cmd_run(a: argparse.Namespace) -> int:
     repo = _validate_repo(a.repo)
     cmd = list(a.cmd)
-    if cmd and cmd[0] == "--":
-        cmd = cmd[1:]
+    if not cmd:
+        raise ValueError("usage: kqc run <repo> [--ref REF] -- <command...>")
     local = Path.home() / "git" / repo
     if local.is_dir():
         sha = local_ref_check(local, a.ref)
@@ -160,8 +160,7 @@ def _parser() -> argparse.ArgumentParser:
     r = sub.add_parser("run", help="run a command on simnode at a pushed git sha")
     r.add_argument("repo")
     r.add_argument("--ref", default="HEAD")
-    r.add_argument("cmd", nargs=argparse.REMAINDER)
-    r.set_defaults(func=_cmd_run)
+    r.set_defaults(func=_cmd_run, cmd=[])
 
     runs_p = sub.add_parser("runs").add_subparsers(dest="runs_cmd", required=True)
     ls = runs_p.add_parser("ls")
@@ -190,7 +189,15 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # ``--`` 뒤는 원격 명령이다. argparse 에 넘기면 옵션(--ref)과 섞이므로 먼저 떼어 낸다.
+    cmd: list[str] = []
+    if "--" in argv:
+        i = argv.index("--")
+        argv, cmd = argv[:i], argv[i + 1 :]
     a = _parser().parse_args(argv)
+    if a.cmd_name == "run":
+        a.cmd = cmd
     try:
         return int(a.func(a))
     except (RunRefused, ValueError) as exc:
