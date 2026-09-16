@@ -106,6 +106,65 @@ def test_run_nightly_dry_run_does_not_execute(tmp_path, monkeypatch):
     assert not (out / "2026-09-14" / "repo-ok-job.log").exists()
 
 
+def test_run_nightly_bad_executable_does_not_block_next_job(tmp_path, monkeypatch):
+    """cmd 의 실행 파일이 없어도 — job 하나만 실패로 남고 다음 job 은 돌고 요약도 써진다."""
+    _sim(monkeypatch)
+    repo = tmp_path / "repo"
+    (repo / "research").mkdir(parents=True)
+    (repo / "research" / "nightly.toml").write_text(
+        """
+[[job]]
+name = "missing-executable"
+cmd = ["/no/such/binary-xyz"]
+
+[[job]]
+name = "ok-job"
+cmd = ["true"]
+"""
+    )
+    out = tmp_path / "out"
+    results = ni.run_nightly(repo, out_root=out, today=MONDAY)
+    by_name = {r.name: r for r in results}
+
+    assert by_name["missing-executable"].rc != 0
+    assert by_name["missing-executable"].timed_out is False
+    assert by_name["ok-job"].rc == 0
+
+    summary = json.loads((out / "2026-09-14" / "repo.json").read_text())
+    assert {row["name"] for row in summary} == {"missing-executable", "ok-job"}
+
+
+def test_run_nightly_only_unknown_job_raises_value_error(tmp_path, monkeypatch):
+    _sim(monkeypatch)
+    repo = _repo(tmp_path)
+    with pytest.raises(ValueError, match="nope"):
+        ni.run_nightly(repo, out_root=tmp_path / "out", today=MONDAY, only="nope")
+
+
+def test_cli_nightly_bad_executable_is_exit_1(tmp_path, monkeypatch):
+    _sim(monkeypatch)
+    repo = tmp_path / "repo"
+    (repo / "research").mkdir(parents=True)
+    (repo / "research" / "nightly.toml").write_text(
+        """
+[[job]]
+name = "missing-executable"
+cmd = ["/no/such/binary-xyz"]
+
+[[job]]
+name = "ok-job"
+cmd = ["true"]
+"""
+    )
+    from krx_quant_core.runtime import cli
+
+    out = tmp_path / "out"
+    monkeypatch.setattr(
+        cli, "run_nightly", lambda repo_root, **kw: ni.run_nightly(repo, out_root=out, today=MONDAY)
+    )
+    assert cli.main(["nightly", str(repo)]) == 1
+
+
 def test_run_nightly_refuses_off_simnode(tmp_path, monkeypatch):
     monkeypatch.setattr("krx_quant_core.runtime.host.socket.gethostname", lambda: "trader")
     repo = _repo(tmp_path)

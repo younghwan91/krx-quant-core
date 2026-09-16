@@ -78,19 +78,28 @@ def load_jobs(repo_root: Path | str) -> list[Job]:
 def _run_one(job: Job, *, repo_root: Path, log_path: Path) -> JobResult:
     start = time.monotonic()
     with log_path.open("wb") as log:
-        proc = subprocess.Popen(
-            ["nice", "-n", "10", *job.cmd],
-            cwd=repo_root,
-            stdout=log,
-            stderr=STDOUT,
-            start_new_session=True,
-        )
+        try:
+            proc = subprocess.Popen(
+                ["nice", "-n", "10", *job.cmd],
+                cwd=repo_root,
+                stdout=log,
+                stderr=STDOUT,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            # 실행 파일이 없거나 권한이 없으면 — job 하나만 실패로 남기고 다음 job 은 돈다.
+            log.write(f"kqc nightly: failed to start {job.cmd!r}: {exc}\n".encode())
+            secs = time.monotonic() - start
+            return JobResult(name=job.name, rc=127, secs=secs, timed_out=False)
         timed_out = False
         try:
             proc.wait(timeout=job.timeout_min * 60)
         except subprocess.TimeoutExpired:
             timed_out = True
-            os.killpg(proc.pid, signal.SIGKILL)
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # 타임아웃 판정과 실제 종료 사이에 이미 죽었을 수 있다
             proc.wait()
     secs = time.monotonic() - start
     return JobResult(name=job.name, rc=proc.returncode, secs=secs, timed_out=timed_out)
@@ -110,6 +119,11 @@ def run_nightly(
     except RuntimeError as exc:
         raise RunRefused(str(exc)) from exc
     repo_root = Path(repo_root)
+    all_jobs = load_jobs(repo_root)
+    jobs = [j for j in all_jobs if only is None or j.name == only]
+    if only is not None and not jobs:
+        raise ValueError(f"nightly job 없음: {only}")
+
     repo_name = repo_root.resolve().name
     day = today or now_kst().date()
     out = Path(out_root) if out_root is not None else Path.home() / ".kqc" / "nightly"
@@ -117,7 +131,6 @@ def run_nightly(
     date_dir.mkdir(parents=True, exist_ok=True)
 
     is_weekend = day.weekday() >= 5  # 5=토, 6=일
-    jobs = [j for j in load_jobs(repo_root) if only is None or j.name == only]
 
     results: list[JobResult] = []
     for job in jobs:
