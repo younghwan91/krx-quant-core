@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import tempfile
 from collections.abc import Callable, Iterable
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
 
@@ -52,17 +52,35 @@ def _default_guard_config() -> OrderGuardConfig:
 
 @dataclass
 class ReplayResult:
-    """리플레이 결과. ``trades`` 는 장부의 청산 원장(매도 fill 한 건당 한 행)."""
+    """리플레이 결과.
+
+    ``orders`` 는 주문 로그 중 주문 행만(차단·제출·거부·취소), ``events`` 는 그 밖의
+    기록 행(``"event"`` 키가 있는 행 — 예: 장부가 적용 못 한 ``unmatched_fill``)이다.
+    둘을 섞으면 주문 수를 세는 쪽이 조용히 틀린다. ``trades`` 는 장부의 청산 원장
+    (매도 fill 한 건당 한 행).
+    """
 
     fills: pd.DataFrame
     orders: list[dict]
     book: PositionBook
     trades: pd.DataFrame
+    events: list[dict] = field(default_factory=list)
 
 
 def _frame_events(df: pd.DataFrame | None, cls: type) -> list[Event]:
     if df is None:
         return []
+    kind = cls.__name__
+    if "ts" in df.columns:
+        n_bad = int(df["ts"].isna().sum())
+        if n_bad:
+            # NaT 는 정렬 키로 비교가 안 돼 순서가 임의가 된다 — 결정론이 조용히 깨진다.
+            raise ValueError(f"{kind} ts 에 NaT/빈 값: {n_bad}행")
+    if "code" in df.columns:
+        dtype = df["code"].dtype
+        if not (pd.api.types.is_object_dtype(dtype) or isinstance(dtype, pd.StringDtype)):
+            # 숫자로 읽힌 종목코드는 앞자리 0 이 이미 사라졌다(005930 → 5930).
+            raise ValueError(f"{kind} code 열이 문자열이 아니다({dtype}) — 앞자리 0 유실")
     names = [f.name for f in fields(cls) if f.name in df.columns]
     out: list[Event] = []
     for row in df[names].to_dict("records"):
@@ -114,6 +132,10 @@ def run_replay(
     book = PositionBook(market_of=market_of)
     kill = KillSwitch(kill_config) if kill_config is not None else None
 
+    # 이벤트를 먼저 목록으로 굳혀 첫 시각을 안다 — on_start 에서 낸 주문도 1970 시계가
+    # 아니라 그날 시계로 가드 카운터·킬 날짜·로그 시각에 잡혀야 한다(1970 날짜로 센 주문은
+    # 첫 이벤트에서 일일 카운터가 리셋되며 사라져 상한을 우회한다).
+    events = list(events)
     fills: list[Fill] = []
     # 주문 로그는 OrderManager 의 공개 경로(order_log jsonl)를 그대로 쓰고 끝에 읽는다 —
     # 실매매 주문 로그와 같은 행 모양이 리플레이 결과에도 남는다.
@@ -123,14 +145,22 @@ def run_replay(
             broker, guard=guard, book=book, kill=kill, clock=clock, order_log=log_path
         )
         engine = EngineCore(strategy, oms)
+        if events:
+            engine.ctx.now = events[0].ts
         engine.start()
         for ev in events:
             fills.extend(engine.feed(ev))
         engine.end()
-        orders: list[dict] = []
+        rows: list[dict] = []
         if log_path.exists():
             with open(log_path, encoding="utf-8") as f:
-                orders = [json.loads(line) for line in f if line.strip()]
+                rows = [json.loads(line) for line in f if line.strip()]
 
     fills_df = pd.DataFrame([asdict(f) for f in fills], columns=_FILL_COLUMNS)
-    return ReplayResult(fills=fills_df, orders=orders, book=book, trades=book.to_frame())
+    return ReplayResult(
+        fills=fills_df,
+        orders=[r for r in rows if "event" not in r],
+        book=book,
+        trades=book.to_frame(),
+        events=[r for r in rows if "event" in r],
+    )

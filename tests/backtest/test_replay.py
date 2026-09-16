@@ -11,6 +11,8 @@ import pytest
 from krx_quant_core.backtest.replay import ReplayResult, merge_events, run_replay
 from krx_quant_core.costs.model import CostModelConfig, KoreanCostModel
 from krx_quant_core.execution.engine import Bar, Quote, StrategyContext, Trade
+from krx_quant_core.execution.guards import OrderGuardConfig
+from krx_quant_core.risk.killswitch import KillSwitchConfig
 
 CODE = "005930"
 T = [datetime(2026, 9, 16, 9, 0, i) for i in range(10)]
@@ -152,3 +154,90 @@ def test_bar_replay_resting_limit_needs_close_through():
     assert list(res.fills["ts"]) == [T[2]]
     touch = run_replay(LimitBuy(), bars, fill_basis="touch")
     assert list(touch.fills["ts"]) == [T[1]]
+
+
+# ----- 리뷰 1차 -----------------------------------------------------------------
+
+
+def test_on_start_orders_use_first_event_clock_and_count_toward_daily_cap():
+    class StartAndEvent:
+        def on_start(self, ctx) -> None:
+            ctx.oms.buy(CODE, 1, 70_100, ref_price=70_100)
+
+        def on_event(self, ev, ctx) -> None:
+            if ev.ts == T[0]:
+                ctx.oms.buy(CODE, 1, 70_100, ref_price=70_100)
+
+    cfg = OrderGuardConfig(
+        max_qty=10, price_band_pct=0.0, max_orders_per_code=0, max_orders_total=1
+    )
+    res = run_replay(StartAndEvent(), _events(), guard_config=cfg)
+    assert [o["status"] for o in res.orders] == ["submitted", "blocked"]
+    assert res.orders[0]["ts"] == "2026-09-16 09:00:00"
+
+
+def test_empty_events_on_start_still_runs():
+    class S:
+        started = False
+
+        def on_start(self, ctx) -> None:
+            S.started = ctx.now is None
+
+        def on_event(self, ev, ctx) -> None:
+            raise AssertionError
+
+    res = run_replay(S(), iter([]))
+    assert S.started and res.fills.empty and res.orders == [] and res.events == []
+
+
+def test_merge_events_rejects_nat_ts():
+    quotes = pd.DataFrame(
+        {"ts": [T[0], pd.NaT], "code": ["A", "B"], "bid": [1.0, 2.0], "ask": [3.0, 4.0]}
+    )
+    with pytest.raises(ValueError, match="NaT"):
+        merge_events(quotes=quotes)
+
+
+def test_merge_events_rejects_numeric_code_column():
+    trades = pd.DataFrame({"ts": [T[0]], "code": [5930], "price": [1.0], "qty": [1.0]})
+    with pytest.raises(ValueError, match="code"):
+        merge_events(trades=trades)
+
+
+def test_latency_delays_fill_to_first_quote_after_arrival():
+    evs = [Quote(T[i], CODE, 70_000, 70_100) for i in range(4)]
+    res = run_replay(BuyThenSell(), evs, latency_sec=2.0)
+    assert list(res.fills["ts"]) == [T[2]]  # T0 주문 → 도착 T2(T1 은 도착 전)
+    instant = run_replay(BuyThenSell(), evs, latency_sec=0.0)
+    assert list(instant.fills["ts"]) == [T[1], T[2]]
+
+
+def test_kill_config_blocks_buy_after_loss_but_orders_split_from_events():
+    class LoseThenRebuy:
+        def __init__(self) -> None:
+            self.step = 0
+
+        def on_event(self, ev, ctx) -> None:
+            if self.step == 0:
+                ctx.oms.buy(ev.code, 1, int(ev.ask), ref_price=ev.ask)
+                self.step = 1
+            elif self.step == 1 and ctx.oms.book.position(ev.code) is not None:
+                ctx.oms.sell(ev.code, 1, 60_000)
+                self.step = 2
+            elif self.step == 2 and ctx.oms.book.position(ev.code) is None:
+                self.result = ctx.oms.buy(ev.code, 1, int(ev.ask), ref_price=ev.ask)
+                self.step = 3
+
+    evs = [
+        Quote(T[0], CODE, 70_000, 70_100),
+        Quote(T[1], CODE, 70_000, 70_100),
+        Quote(T[2], CODE, 69_000, 69_100),  # 매도 @69000 손실
+        Quote(T[3], CODE, 69_000, 69_100),
+    ]
+    s = LoseThenRebuy()
+    res = run_replay(s, evs, kill_config=KillSwitchConfig(max_consecutive_losses=1))
+    assert s.step == 3
+    assert res.orders[-1]["blocked"] is True
+    assert res.orders[-1]["blocked_reason"].startswith("kill:")
+    assert all("event" not in o for o in res.orders)
+    assert res.events == []
