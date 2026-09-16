@@ -28,12 +28,12 @@ Deflated Sharpe·purged CV 검증 통계를 한 패키지로 묶었다.
 ## 설치
 
 ```bash
-pip install krx-quant-core==0.5.0
-# 초 격자 호가 리플레이(backtest.lob)를 numba 로 가속하려면 extra 로: "krx-quant-core[fast]==0.5.0"
-# optuna 스윕(research.optuna_search)까지 쓰려면: "krx-quant-core[fast,opt]==0.5.0"
+pip install krx-quant-core==0.5.1
+# 초 격자 호가 리플레이(backtest.lob)를 numba 로 가속하려면 extra 로: "krx-quant-core[fast]==0.5.1"
+# optuna 스윕(research.optuna_search)까지 쓰려면: "krx-quant-core[fast,opt]==0.5.1"
 
 # PyPI 릴리스 전(또는 태그 고정 개발 중)에는 git 태그로:
-pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.5.0"
+pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.5.1"
 ```
 
 Python ≥ 3.11. 의존성은 `kiwoom-client`(호가단위 표의 정본), `numpy`, `pandas` 뿐이다.
@@ -89,6 +89,61 @@ r.net, r.hold, r.reason                          # 순수익·보유초·청산�
 
 실시간은 `SecondFeatureStream().update(...)` 를 초마다 부른다 — 배치와 같은 `step` 커널이다.
 체결 가정은 원본 그대로 낙관적이다(1호가 전량 체결, 잔량·대기열 무시).
+
+### 초 단위 피처 v2 (`backtest.lob.features_v2`)
+
+scalp-it 93·94번 강화학습 정책의 입력 37열(`scripts/rl_93/features.json`) 중 종목 하나로 계산되는
+35열(`FEATURE_SET_V2`, 정본 순서)을 83번 `build_code`·84번 `_extra` 원본과 **비트 단위로 같게**
+(nan 포함) 낸다. 정의는 고치지 않았다 — 84번이 호가 잔량을 유효성 필터 없이 다시 읽는 것,
+`ofiw` 분모가 pandas `rolling.mean`(Kahan 보정합)인 것까지 그대로다.
+
+```python
+import numpy as np
+from krx_quant_core.backtest.lob import (
+    FEATURE_SET_V2, SecondFeatureStreamV2, aggregate_seconds_v2, compute_features_v2,
+)
+
+# 배치(연구): 한 종목·하루
+X, (ptr, price, volume, side) = aggregate_seconds_v2(ticks, quotes)
+F = compute_features_v2(X, ptr, price, volume, side)   # (22800초, STEP_COLUMNS_V2) float64
+obs = F[:, : len(FEATURE_SET_V2)].astype(np.float32)   # 학습 캐시와 같은 float32
+
+# 실시간(운용): 종목마다 스트림 하나, 초가 닫히면 그 초 호가 행 + 그 초 체결들
+stream = SecondFeatureStreamV2()
+row = stream.update_array(x, price_s, volume_s, side_s)  # 매번 새 float64 배열
+```
+
+입력은 초당 호가 행(`INPUT_COLUMNS_V2`)과 체결 CSR(`ptr`·가격·수량·방향)이다 — `same_size_val10`
+(최근 10초 같은 수량 반복)이 체결 단위라서다. 출력 `STEP_COLUMNS_V2` = 35열 + 보조 `cumval`·`last`,
+자료형은 배치·실시간 모두 float64(원본 계산 자료형). 정본 중 `FEATURE_SET_V2_EXCLUDED` =
+`cum_rank`·`dayret_rank` 는 종목 간 순위(전일 종가·대상 종목 집합 필요)라 내지 않는다 — 소비자가
+채우고, 원본 식은 `cross_section_ranks_v2(cumval, last, prevclose)` 에 옮겨 두었다. 원본 `cum_rank`
+대상은 "그날 틱 500건 이상" 종목이라 하루가 끝나야 정해진다는 점에 주의.
+
+실시간 초당 입력 만들기(배치 `aggregate_seconds_v2` 와 같은 규칙) — 초 `s` 가 닫힐 때:
+
+```python
+x = [
+    last_tick.best_bid, last_tick.best_ask,   # 그 초 마지막 틱 값, nan 이어도 그대로
+    last_tick.strength,                       # (그 초 틱이 없으면 셋 다 nan)
+    q.bidqty1, q.askqty1,                     # q = 그 초 마지막 "유효" 스냅샷(bid1>0 且 ask1>0), 없으면 nan
+    q.bidqty1 + q.bidqty2 + q.bidqty3,        #   ×q.bid1 (nan 잔량은 건너뛴 합) — bid_depth3
+    ...,                                      #   ask_depth3 도 같은 식
+    r.bidqty1, r.askqty1,                     # r = 그 초 마지막 스냅샷(유효 여부 무관), nan 이어도 그대로
+]
+# 유효 스냅샷이 있으면 bid/ask 는 그 스냅샷의 bid1/ask1 로 덮는다.
+row = stream.update_array(x, prices, volumes, sides)   # 그 초 체결들, (ts, seq) 순
+```
+
+스트림 메모리는 인스턴스당 수십 KB 로 고정이다(링버퍼 301초 + 최근 10초 체결). 커널 상태가
+09:00 부터의 누적이라 **장중 재시작**은 그날 초 격자를 처음부터 다시 넣어 복구한다:
+`SecondFeatureStreamV2.from_history(X, ptr, price, volume, side)`.
+
+**백테스트-운용 동일 커널.** v2 는 한 초를 전진하는 `step_v2` 하나를 배치 루프와 실시간 스트림이
+같이 부른다. 골든 테스트(합성 3 시드: 빈 호가창 초·체결 없는 초·폭주 체결·순위 동점)가 원본 대 배치,
+배치 대 실시간, numba 대 파이썬 폴백을 모두 `np.array_equal(equal_nan=True)` 와 자료형까지 대조한다.
+simnode 실측(워밍업 뒤, 부하 따라 흔들림): 스트림 한 초 갱신 6~34µs·배치 1~4µs/초(numba),
+폴백은 각각 약 180µs·60µs.
 
 ### 지정가 대기열 모델 (`backtest.lob.queue`, v0.3)
 
