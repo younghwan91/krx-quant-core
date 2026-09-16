@@ -6,6 +6,7 @@
 사람이 아니라 실행 자체에서 나온다.
 """
 
+from krx_quant_core.research.optuna import optuna_search
 from krx_quant_core.research.sweep import SweepResult, grid, run_sweep
 
-__all__ = ["SweepResult", "grid", "run_sweep"]
+__all__ = ["SweepResult", "grid", "optuna_search", "run_sweep"]
