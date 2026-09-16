@@ -315,3 +315,123 @@ def test_instance_lock_second_acquire_raises(tmp_path):
             with InstanceLock(path):
                 pass
     first.release()  # 두 번 풀어도 안전
+
+
+# ------------------------------------------------------------------ review round 1
+
+
+def test_sync_unmatched_fill_does_not_crash_and_rest_of_batch_applies(tmp_path):
+    """브로커에만 있는 보유를 청산 → 장부가 적용 못 하는 fill. 배치 나머지는 반영돼야 한다."""
+    log = tmp_path / "orders.jsonl"
+    kill = KillSwitch(KillSwitchConfig(max_consecutive_losses=1))
+    broker = PaperBroker(holdings={CODE: Holding(CODE, 5, 10_000.0)})
+    om, broker, _, book, _ = _oms(broker=broker, kill=kill, order_log=log)
+    assert om.sell(CODE, 5, 9_000).status is OrderStatus.SUBMITTED
+    assert om.buy("000660", 1, 10_000, ref_price=10_000).status is OrderStatus.SUBMITTED
+    broker.on_quote(CODE, T0, bid=9_000, ask=9_010)
+    broker.on_quote("000660", T0, bid=9_990, ask=10_000)
+
+    fills = om.sync()
+
+    assert [f.side for f in fills] == ["sell", "buy"]
+    assert om.unmatched_fills == [fills[0]]
+    assert book.position("000660").qty == 1
+    assert kill.losses == 0 and kill.wins == 0 and not kill.killed
+    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    unmatched = [r for r in rows if r.get("event") == "unmatched_fill"]
+    assert len(unmatched) == 1
+    assert unmatched[0]["code"] == CODE and unmatched[0]["side"] == "sell"
+    assert unmatched[0]["qty"] == 5
+
+
+def test_pending_sell_reserves_holdings():
+    broker = PaperBroker(holdings={CODE: Holding(CODE, 10, 10_000.0)})
+    om, _, _, _, _ = _oms(broker=broker)
+    assert om.sell(CODE, 10, 12_000).status is OrderStatus.SUBMITTED  # 시세 없음 → 대기
+    mr = om.sell(CODE, 10, 12_000)
+    assert mr.status is OrderStatus.BLOCKED
+    assert mr.result.blocked_reason == "청산 수량이 보유 초과: 10 > 0"
+    assert om.sell(CODE, 1, 12_000).result.blocked_reason == "청산 수량이 보유 초과: 1 > 0"
+
+
+def _losing_split_position(om: OrderManager, broker: PaperBroker, minute: int) -> None:
+    t = T0.replace(minute=minute)
+    assert om.buy(CODE, 3, 10_000, ref_price=10_000).status is OrderStatus.SUBMITTED
+    broker.on_quote(CODE, t, bid=9_990, ask=10_000)
+    om.sync()
+    # 3분할 손절. 마지막 조각은 소폭 이익이지만 포지션 합계는 손실.
+    for i, px in enumerate((9_700, 9_750, 10_100)):
+        assert om.sell(CODE, 1, px).status is OrderStatus.SUBMITTED
+        broker.on_quote(CODE, t.replace(second=10 * (i + 1)), bid=px, ask=px + 10)
+        assert [f.side for f in om.sync()] == ["sell"]
+
+
+def test_split_exit_counts_as_one_trade_for_kill():
+    kill = KillSwitch(KillSwitchConfig(max_consecutive_losses=2))
+    om, broker, _, book, _ = _oms(kill=kill)
+
+    _losing_split_position(om, broker, minute=0)
+    assert book.position(CODE) is None
+    assert kill.losses == 1 and kill.consecutive_losses == 1 and kill.wins == 0
+    assert not kill.killed
+    assert kill.realized_krw == pytest.approx(book.realized_krw)
+
+    _losing_split_position(om, broker, minute=5)
+    assert kill.consecutive_losses == 2
+    assert kill.killed and kill.kill_reason == "consecutive_losses"
+    assert kill.realized_krw == pytest.approx(book.realized_krw)
+
+
+class _RaisingBroker(PaperBroker):
+    dry_run = False
+
+    def submit(self, intent: OrderIntent) -> OrderResult:
+        raise RuntimeError("boom")
+
+    def cancel(self, ord_no: str, intent: OrderIntent) -> OrderResult:
+        raise TimeoutError("slow")
+
+
+def test_broker_exceptions_become_rejected_and_logged(tmp_path):
+    log = tmp_path / "orders.jsonl"
+    broker = _RaisingBroker(holdings={CODE: Holding(CODE, 5, 10_000.0)})
+    om, _, guard, _, _ = _oms(broker=broker, order_log=log)
+
+    b = om.buy(CODE, 1, 10_000, ref_price=10_000)
+    assert b.status is OrderStatus.REJECTED
+    assert b.result.submitted and b.result.return_code is None
+    assert b.result.return_msg == "RuntimeError: boom"
+    assert guard.count_total == 1  # 나갔을 수도 있으니 보수적으로 센다
+
+    s = om.sell(CODE, 1, 10_000)
+    assert s.status is OrderStatus.REJECTED and s.result.return_msg == "RuntimeError: boom"
+    assert guard.count_total == 1
+
+    c = om.cancel("P000001", b.result.intent)
+    assert c.status is OrderStatus.REJECTED and c.result.return_msg == "TimeoutError: slow"
+
+    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert [r["status"] for r in rows] == ["rejected", "rejected", "rejected"]
+
+
+def test_sell_qty_below_one_blocked():
+    broker = PaperBroker(holdings={CODE: Holding(CODE, 5, 10_000.0)})
+    om, broker, _, _, _ = _oms(broker=broker)
+    for q in (0, -1):
+        mr = om.sell(CODE, q, 10_000)
+        assert mr.status is OrderStatus.BLOCKED
+        assert mr.result.blocked_reason == f"청산 수량이 1주 미만: {q}"
+    assert broker.open_orders() == []
+
+
+class _DryAttrBroker(PaperBroker):
+    dry_run = True
+
+
+def test_oms_blocked_result_uses_broker_dry_run_attr():
+    kill = KillSwitch()
+    kill.force_stop()
+    om, _, _, _, _ = _oms(broker=_DryAttrBroker(), kill=kill)
+    assert om.buy(CODE, 1, 10_000, ref_price=10_000).result.dry_run is True
+    assert om.sell(CODE, 1, 10_000).result.dry_run is True
+    assert _oms(kill=kill)[0].buy(CODE, 1, 10_000, ref_price=10_000).result.dry_run is False
