@@ -12,6 +12,7 @@ from krx_quant_core.backtest.replay import ReplayResult, merge_events, run_repla
 from krx_quant_core.costs.model import CostModelConfig, KoreanCostModel
 from krx_quant_core.execution.engine import Bar, Quote, StrategyContext, Trade
 from krx_quant_core.execution.guards import OrderGuardConfig
+from krx_quant_core.market.session import KST
 from krx_quant_core.risk.killswitch import KillSwitchConfig
 
 CODE = "005930"
@@ -125,10 +126,12 @@ def test_merge_events_same_ts_orders_quote_trade_bar_stably():
         "TradeD",
         "BarE",
     ]
-    assert evs[0] == Quote(T[0], "B", 2.0, 4.0)
+    # naive ts 는 KST 로 붙는다(아래 test_merge_events_localizes_naive_ts_to_kst).
+    k0, k1 = T[0].replace(tzinfo=KST), T[1].replace(tzinfo=KST)
+    assert evs[0] == Quote(k0, "B", 2.0, 4.0)
     assert isinstance(evs[0].ts, datetime)
-    assert evs[-1] == Bar(T[1], "E", 1.0, 2.0, 0.5, 1.5, 100.0)
-    assert evs[2] == Trade(T[1], "C", 10.0, 1.0)
+    assert evs[-1] == Bar(k1, "E", 1.0, 2.0, 0.5, 1.5, 100.0)
+    assert evs[2] == Trade(k1, "C", 10.0, 1.0)
 
 
 def test_merge_events_none_gives_empty():
@@ -241,3 +244,24 @@ def test_kill_config_blocks_buy_after_loss_but_orders_split_from_events():
     assert res.orders[-1]["blocked_reason"].startswith("kill:")
     assert all("event" not in o for o in res.orders)
     assert res.events == []
+
+
+# ----- 최종 리뷰(v0.5.0) --------------------------------------------------------
+
+
+def test_merge_events_localizes_naive_ts_to_kst_and_keeps_aware():
+    naive = pd.DataFrame({"ts": [T[1]], "code": ["A"], "bid": [1.0], "ask": [2.0]})
+    utc = pd.DataFrame(
+        {"ts": [pd.Timestamp("2026-09-16 00:00:00.5", tz="UTC")], "code": ["B"],
+         "price": [1.0], "qty": [1.0]}
+    )
+    evs = merge_events(quotes=naive, trades=utc)  # naive·aware 섞여도 정렬이 터지지 않는다
+    assert [e.code for e in evs] == ["B", "A"]  # 09:00:00.5 KST < 09:00:01 KST
+    assert evs[1].ts == T[1].replace(tzinfo=KST) and evs[1].ts.utcoffset() is not None
+    assert str(evs[0].ts.tzinfo) == "UTC"
+
+
+def test_replay_fills_from_paper_orders_are_own_orders():
+    res = run_replay(BuyThenSell(), _events())
+    assert list(res.fills["side"]) == ["buy", "sell"]
+    assert not [e for e in res.events if e.get("event") == "foreign_fill"]

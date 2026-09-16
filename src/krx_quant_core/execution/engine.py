@@ -16,9 +16,13 @@ NautilusTrader 의 원칙을 빌렸다: 전략은 시세 이벤트와 :class:`Or
 - **틱 리플레이 지연** — Trade 는 직전 Quote 의 bid/ask 를 다시 내민다. ``latency_sec=0``
   이면 이미 한 번 체결에 쓴 호가를 다음 Trade 에서 또 가져갈 수 있다(내 체결이 호가를
   소진하지 않는다는 가정 탓). 틱 리플레이는 ``latency_sec>=1`` 을 권한다.
-- **실매매 배선** — ``KiwoomBroker`` 위에서 ``feed`` 는 이벤트마다 ``oms.sync()`` (체결
-  조회 REST)를 부른다. 웹소켓 틱마다 그대로 부르면 조회 한도를 넘는다. 실매매는 시세
-  이벤트로 ``feed`` 하되 체결 동기화는 타이머로 조절하도록 배선할 것(여기서는 문서만).
+- **실매매 배선** — ``KiwoomBroker`` 위에서 ``feed`` 는 이벤트마다 ``oms.sync()`` 를
+  부른다. ``fills_verified=False``(기본)면 ``poll_fills`` 가 조회 없이 ``[]`` 라 비용이
+  없다. ``fills_verified=True`` 로 켜면 웹소켓 틱마다 체결 조회 REST 가 나가 조회 한도를
+  넘으니, 시세는 ``feed`` 로 먹이고 체결 동기화는 타이머(예: 2초마다 ``oms.sync()``)로
+  따로 돌리도록 배선할 것. ``sync`` 는 조회 실패를 삼키고 로그만 남긴다.
+- 이름 주의: 여기 :class:`Trade` 는 **시세 체결 틱**이다. ``krx_quant_core.backtest`` 의
+  ``Trade``(청산 원장 한 행)와 이름만 같다 — 둘을 한 파일에서 쓰면 별칭으로 임포트할 것.
 """
 
 from __future__ import annotations

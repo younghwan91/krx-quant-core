@@ -30,7 +30,7 @@
 기존 `OrderIntent`·`OrderResult`·`OrderGuard`·`KillSwitch` 는 **바꾸지 않는다**. 그 위에 새 모듈을 더한다.
 
 ### 3.1 `execution/events.py`
-- `OrderStatus(StrEnum)`: `blocked`, `submitted`, `partial`, `filled`, `canceled`, `rejected`.
+- `OrderStatus(StrEnum)`: `blocked`, `submitted`, `partial`, `filled`, `canceled`, `rejected`, `unknown`(최종 리뷰 추가 — 나갔는지 모름, 재시도 금지).
 - `Fill(frozen)`: `ord_no: str`, `code: str`, `side: "buy"|"sell"`, `qty: int`, `price: int`, `ts: datetime`.
 - `Holding(frozen)`: `code`, `qty: int`, `avg_price: float`.
 - `OpenOrder(frozen)`: `ord_no`, `code`, `side`, `qty`, `remaining: int`, `price: int`.
@@ -150,7 +150,7 @@ class Broker(Protocol):
 8. 실주문 체결 판정·킬 판정 교체는 **이번에 하지 않는다**(수치 동일성 증명 비용이 크고 내일 실매매) — 다음 단계로 적는다.
 
 ## 6. 오류 처리
-- 브로커 제출 예외 → `OrderResult(submitted=True, return_code=None, return_msg=str(e))`, 상태 `rejected`. 재시도 없음.
+- 브로커 제출 예외·`return_code` 없는 제출 결과 → `OrderResult(submitted=True, return_code=None, ...)`, 상태 `unknown`(최종 리뷰에서 `rejected` 에서 변경). 재시도 없음. 매수는 횟수에 센다.
 - 장부 journal 쓰기 실패는 예외를 올린다(상태가 조용히 사라지면 안 된다).
 - `reconcile` 은 절대 주문을 내지 않는다.
 - 스윕 objective 예외는 행 단위로 격리. `start_run` 게이트 거부는 그대로 `RunRefused`.

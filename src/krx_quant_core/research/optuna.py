@@ -41,11 +41,16 @@ def optuna_search(
     metric: str = "score",
     seed: int = 0,
     allow_dirty: bool = False,
+    trials_dir: Path | str | None = None,
 ) -> SweepResult:
     """``space(trial) -> config`` 로 TPE 탐색. 매 trial 을 시행 원장에 적는다(중복 제거는 원장 몫).
 
     ``space`` 가 뽑은 config 로 ``objective(cfg)`` 를 돌리고 ``objective(cfg)[metric]`` 을
     optuna 가 최적화할 값으로 준다. ``TPESampler(seed=seed)`` 로 재현성을 고정한다.
+
+    objective 가 ``metric`` 키 없는 dict 를 돌려주면 그 trial 은 ``error`` 행(값 NaN)이다 —
+    ``KeyError`` 로 study 전체가 죽지 않게. ``trials_dir`` 는 :func:`~.sweep.run_sweep` 과
+    같다(swing-it 처럼 원장이 ``research/logs`` 에 있는 레포).
     """
     try:
         import optuna
@@ -53,7 +58,7 @@ def optuna_search(
         raise ImportError('pip install "krx-quant-core[opt]"') from exc
 
     repo_root = Path(repo_root)
-    logs_dir = resolve_trials_dir(repo_root, None)
+    logs_dir = resolve_trials_dir(repo_root, trials_dir)
     rows: list[dict[str, Any]] = []
     config_keys: list[str] = []
 
@@ -67,6 +72,9 @@ def optuna_search(
         except Exception as exc:  # noqa: BLE001 — 한 config 가 죽어도 study 는 계속 돈다
             rows.append({**cfg, "error": repr(exc)})
             return float("nan")  # optuna 가 이 trial 을 FAIL 로 표시하고 다음으로 넘어간다
+        if metric not in metrics:
+            rows.append({**cfg, **metrics, "error": f"objective 결과에 metric {metric!r} 없음"})
+            return float("nan")
         rows.append({**cfg, **metrics})
         return metrics[metric]
 
@@ -85,6 +93,7 @@ def optuna_search(
         data=data,
         seed=seed,
         allow_dirty=allow_dirty,
+        trials_dir=trials_dir,
     ) as run:
         study.optimize(_objective, n_trials=n_trials, n_jobs=n_jobs)
         n_trials_recorded = count_trials(label, logs_dir=logs_dir)

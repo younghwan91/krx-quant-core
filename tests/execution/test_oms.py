@@ -392,26 +392,26 @@ class _RaisingBroker(PaperBroker):
         raise TimeoutError("slow")
 
 
-def test_broker_exceptions_become_rejected_and_logged(tmp_path):
+def test_broker_exceptions_become_unknown_and_logged(tmp_path):
     log = tmp_path / "orders.jsonl"
     broker = _RaisingBroker(holdings={CODE: Holding(CODE, 5, 10_000.0)})
     om, _, guard, _, _ = _oms(broker=broker, order_log=log)
 
     b = om.buy(CODE, 1, 10_000, ref_price=10_000)
-    assert b.status is OrderStatus.REJECTED
+    assert b.status is OrderStatus.UNKNOWN  # 나갔는지 모른다 — 재시도 금지
     assert b.result.submitted and b.result.return_code is None
     assert b.result.return_msg == "RuntimeError: boom"
     assert guard.count_total == 1  # 나갔을 수도 있으니 보수적으로 센다
 
     s = om.sell(CODE, 1, 10_000)
-    assert s.status is OrderStatus.REJECTED and s.result.return_msg == "RuntimeError: boom"
+    assert s.status is OrderStatus.UNKNOWN and s.result.return_msg == "RuntimeError: boom"
     assert guard.count_total == 1
 
     c = om.cancel("P000001", b.result.intent)
-    assert c.status is OrderStatus.REJECTED and c.result.return_msg == "TimeoutError: slow"
+    assert c.status is OrderStatus.UNKNOWN and c.result.return_msg == "TimeoutError: slow"
 
     rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
-    assert [r["status"] for r in rows] == ["rejected", "rejected", "rejected"]
+    assert [r["status"] for r in rows] == ["unknown", "unknown", "unknown"]
 
 
 def test_sell_qty_below_one_blocked():
@@ -470,7 +470,7 @@ def test_exception_result_not_ok_even_for_dry_run_broker():
         om.sell(CODE, 1, 10_000),
         om.cancel("P1", OrderIntent(side="buy", code=CODE, qty=1, price=10_000)),
     ):
-        assert mr.status is OrderStatus.REJECTED
+        assert mr.status is OrderStatus.UNKNOWN
         assert mr.result.dry_run is False and mr.result.ok is False
 
 
@@ -496,3 +496,129 @@ def test_sell_survives_holdings_failure(tmp_path):
     # 수량·가격 검사는 그대로 선다
     assert om.sell(CODE, 0, 10_000).result.blocked_reason == "청산 수량이 1주 미만: 0"
     assert om.sell(CODE, 1, 0).result.blocked_reason == "지정가가 0 이하: 0"
+
+
+# ------------------------------------------------------------------ final review (v0.5.0)
+
+
+class _TimeoutApi:
+    """``KiwoomBroker`` 에 넣을 가짜 api — 주문 POST 가 ``TimeoutError`` 로 끝난다."""
+
+    def __init__(self) -> None:
+        from types import SimpleNamespace
+
+        self.calls = 0
+
+        def boom(**kw):
+            self.calls += 1
+            raise TimeoutError("read timed out")
+
+        empty = lambda **kw: {}  # noqa: E731
+        self.order = SimpleNamespace(buy_order=boom, sell_order=boom, cancel_order=boom)
+        self.account = SimpleNamespace(
+            evaluation_balance_detail=empty, unfilled_orders=empty, filled_orders=empty
+        )
+
+
+def test_kiwoom_timeout_buy_is_unknown_and_counted(tmp_path):
+    from krx_quant_core.execution.kiwoom_broker import KiwoomBroker
+
+    log = tmp_path / "orders.jsonl"
+    api = _TimeoutApi()
+    om, _, guard, _, _ = _oms(broker=KiwoomBroker(api, dry_run=False), order_log=log)
+    mr = om.buy(CODE, 1, 10_000, ref_price=10_000)
+    assert api.calls == 1  # 재시도 없음
+    assert mr.status is OrderStatus.UNKNOWN
+    assert mr.result.submitted and mr.result.return_code is None
+    assert guard.count_total == 1  # 나갔을 수 있으니 센다
+    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert rows[-1]["status"] == "unknown"
+
+
+def test_rc_none_result_is_unknown_for_sell_and_rc0_still_submitted():
+    class _NoRc(PaperBroker):
+        def submit(self, intent):
+            return OrderResult(intent=intent, dry_run=False, submitted=True, ord_no="9")
+
+    broker = _NoRc(holdings={CODE: Holding(CODE, 5, 10_000.0)})
+    om, _, guard, _, _ = _oms(broker=broker)
+    assert om.sell(CODE, 1, 10_000).status is OrderStatus.UNKNOWN
+    assert om.buy(CODE, 1, 10_000, ref_price=10_000).status is OrderStatus.UNKNOWN
+    assert guard.count_total == 1
+    assert om.own_orders == {"9"}
+    assert _oms()[0].buy(CODE, 1, 10_000, ref_price=10_000).status is OrderStatus.SUBMITTED
+
+
+class _PollFailBroker(PaperBroker):
+    def poll_fills(self):
+        raise ConnectionError("down")
+
+
+def test_sync_poll_fills_failure_is_logged_and_returns_empty(tmp_path):
+    log = tmp_path / "orders.jsonl"
+    om, _, _, _, _ = _oms(broker=_PollFailBroker(), order_log=log)
+    assert om.sync() == []
+    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert rows[-1]["event"] == "poll_fills_failed"
+    assert rows[-1]["error"] == "ConnectionError: down"
+
+
+class _ForeignBroker(PaperBroker):
+    """같은 계좌의 다른 데몬 주문 체결을 섞어 내미는 브로커."""
+
+    def __init__(self, extra: list[Fill], **kw) -> None:
+        super().__init__(**kw)
+        self.extra = extra
+
+    def poll_fills(self):
+        out = self.extra + super().poll_fills()
+        self.extra = []
+        return out
+
+
+def test_sync_ignores_foreign_fill_and_applies_own(tmp_path):
+    log = tmp_path / "orders.jsonl"
+    foreign = Fill("0000777", "000660", "buy", 3, 50_000, T0)
+    om, broker, _, book, _ = _oms(broker=_ForeignBroker([foreign]), order_log=log)
+    mr = om.buy(CODE, 2, 10_000, ref_price=10_000)
+    assert om.own_orders == {mr.result.ord_no}
+    broker.on_quote(CODE, T0, bid=9_990, ask=10_000)
+
+    fills = om.sync()
+
+    assert [f.code for f in fills] == [CODE]
+    assert book.position(CODE).qty == 2
+    assert book.position("000660") is None
+    assert om.foreign_fills == [foreign]
+    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    ff = [r for r in rows if r.get("event") == "foreign_fill"]
+    assert len(ff) == 1 and ff[0]["ord_no"] == "0000777" and ff[0]["code"] == "000660"
+
+
+def test_sync_matches_own_order_by_normalized_ord_no():
+    class _Padded(_ForeignBroker):
+        def submit(self, intent):
+            return OrderResult(
+                intent=intent, dry_run=False, submitted=True, ord_no="0000042", return_code=0
+            )
+
+    fill = Fill("42", CODE, "buy", 1, 10_000, T0)
+    om, _, _, book, _ = _oms(broker=_Padded([fill]))
+    om.buy(CODE, 1, 10_000, ref_price=10_000)
+    assert om.own_orders == {"42"}
+    assert om.sync() == [fill]
+    assert book.position(CODE).qty == 1 and om.foreign_fills == []
+
+
+def test_own_orders_only_false_applies_every_fill():
+    foreign = Fill("0000777", "000660", "buy", 3, 50_000, T0)
+    clock = _Clock()
+    om = OrderManager(
+        _ForeignBroker([foreign]),
+        guard=_guard(clock),
+        book=PositionBook(),
+        clock=clock,
+        own_orders_only=False,
+    )
+    assert om.sync() == [foreign]
+    assert om.book.position("000660").qty == 3 and om.foreign_fills == []

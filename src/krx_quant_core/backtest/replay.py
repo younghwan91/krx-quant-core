@@ -87,7 +87,10 @@ def _frame_events(df: pd.DataFrame | None, cls: type) -> list[Event]:
         kw = {}
         for name, value in row.items():
             if name == "ts":
-                kw[name] = pd.Timestamp(value).to_pydatetime()
+                ts = pd.Timestamp(value)
+                if ts.tzinfo is None:
+                    ts = ts.tz_localize(KST)
+                kw[name] = ts.to_pydatetime()
             elif name == "code":
                 kw[name] = str(value)
             else:
@@ -106,6 +109,10 @@ def merge_events(
 
     정렬 키는 ``(ts, 종류 순서, 입력 순서)`` — 안정 정렬이라 같은 시각·같은 종류는
     입력 순서를 지킨다. 같은 입력이면 언제나 같은 순서(리플레이 결정론의 전제).
+
+    ``ts`` 가 tz-naive 면 **KST 로 붙인다**(KRX 데이터는 KST 벽시계로 저장된다). naive 와
+    aware 가 섞이면 정렬 비교가 ``TypeError`` 로 터지고, 전략이 ``now_kst()``(aware)와
+    비교할 때도 터진다. 이미 aware 인 값은 그 시간대 그대로 둔다(같은 순간이면 비교 동일).
     """
     evs = _frame_events(quotes, Quote) + _frame_events(trades, Trade) + _frame_events(bars, Bar)
     return sorted(evs, key=lambda e: (e.ts, _KIND_ORDER[type(e)]))

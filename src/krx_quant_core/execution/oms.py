@@ -14,6 +14,20 @@ scalp-it·daytrade-it 데몬이 실계좌(``KiwoomBroker``)나 모의(``PaperBro
 같은 신호로 주문을 두 번 낸다). :meth:`OrderManager.reconcile` 은 장부와 브로커 보유를
 비교해 **보고만** 한다 — 어느 쪽이 맞는지 코드가 판단해 고치면 실계좌에서 엉뚱한
 주문이 나갈 수 있으니, 판단은 사람 몫으로 남긴다.
+
+**공유 계좌.** scalp-it·daytrade-it 은 같은 키움 계좌를 쓴다. 체결 조회는 계좌 단위라
+다른 데몬 주문의 체결도 섞여 온다. 그래서 :meth:`OrderManager.sync` 는 이 매니저가 낸
+주문번호(:attr:`OrderManager.own_orders`, :func:`~.events.normalize_ord_no` 로 정규화)의
+체결만 장부에 반영하고 나머지는 :attr:`OrderManager.foreign_fills` 로 뺀다.
+
+**알려진 한계(후속 과제).**
+
+* ``_open_realized``(분할 청산 누적 손익)·킬스위치 상태·``own_orders`` 는 메모리에만 있다 —
+  데몬을 재시작하면 복원되지 않는다. 재시작 전에 낸 주문의 체결은 ``foreign_fills`` 로
+  빠지고, 재시작을 끼운 분할 청산의 승패 판정은 재시작 뒤 조각만으로 갈린다.
+* 제출이 ``UNKNOWN`` 인데 응답에 주문번호가 없으면(타임아웃) ``own_orders`` 에 넣을 번호가
+  없다. 그 주문이 실제로 나가 체결되면 ``foreign_fills`` 로 빠진다 — 호출부는 UNKNOWN 뒤에
+  미체결·잔고·``foreign_fills`` 를 보고 사람이 판단한다(재시도 금지).
 """
 
 from __future__ import annotations
@@ -31,7 +45,7 @@ from ..market.session import now_kst
 from ..risk.killswitch import KillSwitch
 from .book import PositionBook
 from .broker import Broker
-from .events import Fill, OrderStatus
+from .events import Fill, OrderStatus, normalize_ord_no
 from .guards import OrderGuard
 from .orders import OrderIntent, OrderResult
 
@@ -123,9 +137,26 @@ class ManagedResult:
     status: OrderStatus
 
 
+def _is_unknown(result: OrderResult) -> bool:
+    """실제 제출을 시도했는데 ``return_code`` 가 없다 — 나갔는지 모른다.
+
+    ``KiwoomBroker`` 는 예외를 던지지 않는다. 타임아웃·응답 파싱 실패도
+    ``submitted=True, return_code=None`` 결과로 돌려주므로, 이 모양을 거부로 읽으면
+    "안 나간 주문"으로 오인해 재시도·한도 미차감 사고가 난다.
+    """
+    return (
+        not result.blocked
+        and not result.dry_run
+        and result.submitted
+        and result.return_code is None
+    )
+
+
 def _status_of(result: OrderResult) -> OrderStatus:
     if result.blocked:
         return OrderStatus.BLOCKED
+    if _is_unknown(result):
+        return OrderStatus.UNKNOWN
     if result.ok:
         return OrderStatus.SUBMITTED
     return OrderStatus.REJECTED
@@ -135,13 +166,18 @@ class OrderManager:
     """킬·가드·장부·브로커를 묶는 주문 창구.
 
     가드의 일일 횟수 카운트(:meth:`OrderGuard.record_order`) 규칙: **매수가 가드를
-    통과했고, dry-run 으로 통과했거나 실제 제출이 성공(``result.ok``)했을 때만** 센다.
-    브로커가 거부(rc≠0)하거나 막은 주문은 세지 않는다 — 나가지 않은 주문으로 상한이
-    닳으면 정작 필요한 진입이 막힌다. 청산 매도는 가드를 거치지 않으므로 세지 않는다
+    통과했고, dry-run 으로 통과했거나 실제 제출이 성공(``result.ok``)했거나 결과가
+    ``UNKNOWN``(나갔는지 모름 — 예외·``return_code`` 없음)일 때** 센다. 브로커가
+    거부(rc≠0)하거나 막은 주문은 세지 않는다 — 나가지 않은 주문으로 상한이 닳으면
+    정작 필요한 진입이 막힌다. UNKNOWN 을 세는 이유는 반대다: 나간 주문을 안 세면
+    상한을 넘겨 산다. 청산 매도는 가드를 거치지 않으므로 세지 않는다
     (세면 청산이 늘수록 매수 한도가 줄어드는 엉뚱한 결합이 생긴다).
 
     ``clock`` 은 킬스위치 날짜와 주문 로그 시각에 쓴다. 가드도 같은 시계로 만들어야
     일일 리셋 시점이 어긋나지 않는다.
+
+    ``own_orders_only``(기본 ``True``)면 :meth:`sync` 는 :attr:`own_orders` 의 체결만
+    반영한다(공유 계좌 — 모듈 docstring). 계좌를 혼자 쓰는 게 확실할 때만 ``False``.
     """
 
     def __init__(
@@ -153,6 +189,7 @@ class OrderManager:
         kill: KillSwitch | None = None,
         clock: Callable[[], datetime] = now_kst,
         order_log: Path | str | None = None,
+        own_orders_only: bool = True,
     ) -> None:
         self.broker = broker
         self.guard = guard
@@ -160,6 +197,11 @@ class OrderManager:
         self.kill = kill
         self._clock = clock
         self._order_log = Path(order_log) if order_log is not None else None
+        self._own_orders_only = own_orders_only
+        #: 이 매니저가 낸 주문번호(정규화). 상태가 SUBMITTED·UNKNOWN 이고 번호가 있는 것.
+        self.own_orders: set[str] = set()
+        #: 다른 주체(같은 계좌의 다른 데몬·HTS 수동 주문 등)의 체결 — 장부·킬에 반영 안 함.
+        self.foreign_fills: list[Fill] = []
         #: 장부가 적용하지 못한 체결(``PositionBook.apply`` 가 ``ValueError``). 대개 장부
         #: 밖에서 이미 들고 있던 보유(브로커 보유로 청산한 경우)나 중복 체결이다. 킬스위치에는
         #: 반영하지 않았다 — :meth:`reconcile` 결과와 함께 호출부·사람이 확인한다.
@@ -178,8 +220,9 @@ class OrderManager:
     def buy(self, code: str, qty: int, price: int, *, ref_price: float | None) -> ManagedResult:
         """신규 진입. 킬스위치 → 가드 → 제출 순. 먼저 걸린 사유 하나로 막는다.
 
-        브로커 호출이 예외를 던지면 REJECTED 로 기록하고 돌려준다(데몬을 죽이지 않는다).
-        이때 주문이 실제로 나갔는지 알 수 없으므로 횟수는 **보수적으로 센다**.
+        브로커 호출이 예외를 던지거나 ``return_code`` 없는 제출 결과면 ``UNKNOWN`` 으로
+        기록하고 돌려준다(데몬을 죽이지 않는다). 주문이 실제로 나갔는지 알 수 없으므로
+        횟수는 **보수적으로 센다**. UNKNOWN 은 재시도 금지 — 미체결·잔고로 확인한다.
         """
         intent = OrderIntent(side="buy", code=code, qty=qty, price=price)
         if self.kill is not None:
@@ -193,10 +236,10 @@ class OrderManager:
             result = self.broker.submit(intent)
         except Exception as e:  # 어떤 브로커 예외든 기록하고 계속 돈다
             self.guard.record_order(code)
-            return self._finish(self._errored(intent, e), OrderStatus.REJECTED)
-        if result.ok:  # dry-run 통과 또는 실제 제출 성공
+            return self._finish(self._errored(intent, e), OrderStatus.UNKNOWN, track=True)
+        if result.ok or _is_unknown(result):  # dry-run 통과·제출 성공·나갔는지 모름
             self.guard.record_order(code)
-        return self._finish(result)
+        return self._finish(result, track=True)
 
     def sell(
         self, code: str, qty: int, price: int, *, ref_price: float | None = None
@@ -232,17 +275,22 @@ class OrderManager:
         try:
             result = self.broker.submit(intent)
         except Exception as e:
-            return self._finish(self._errored(intent, e), OrderStatus.REJECTED)
-        return self._finish(result)
+            return self._finish(self._errored(intent, e), OrderStatus.UNKNOWN, track=True)
+        return self._finish(result, track=True)
 
     def cancel(self, ord_no: str, intent: OrderIntent) -> ManagedResult:
-        """미체결 취소. 킬·가드와 무관(취소는 위험을 줄이는 쪽). 예외는 REJECTED 로."""
+        """미체결 취소. 킬·가드와 무관(취소는 위험을 줄이는 쪽).
+
+        예외·``return_code`` 없음은 UNKNOWN(취소가 먹혔는지 모름 — 미체결로 확인).
+        """
         try:
             result = self.broker.cancel(ord_no, intent)
         except Exception as e:
-            return self._finish(self._errored(intent, e), OrderStatus.REJECTED)
+            return self._finish(self._errored(intent, e), OrderStatus.UNKNOWN)
         if result.blocked:
             status = OrderStatus.BLOCKED
+        elif _is_unknown(result):
+            status = OrderStatus.UNKNOWN
         elif result.ok:
             status = OrderStatus.CANCELED
         else:
@@ -252,7 +300,14 @@ class OrderManager:
     # ----- 체결·대사 ----------------------------------------------------------
 
     def sync(self) -> list[Fill]:
-        """새 체결을 장부에 반영하고, 청산 손익을 킬스위치에 기록한다. 폴링한 fill 전부를 돌려준다.
+        """새 체결을 장부에 반영하고, 청산 손익을 킬스위치에 기록한다. 반영 대상 fill 을 돌려준다.
+
+        ``poll_fills`` 가 예외면 ``poll_fills_failed`` 로그만 남기고 ``[]`` — 체결 조회
+        한 번 실패로 :meth:`EngineCore.feed` 가 매 이벤트마다 터지면 청산 로직까지 멈춘다.
+
+        ``own_orders_only`` 면 :attr:`own_orders` 에 없는 주문번호의 fill 은
+        :attr:`foreign_fills` 와 ``foreign_fill`` 로그 행으로 빼고 돌려주지 않는다(같은
+        계좌 다른 데몬의 체결이 이 장부·킬스위치에 섞이면 안 된다).
 
         ``poll_fills`` 는 이미 커서를 넘겼으므로 한 fill 이 실패해도 나머지는 **각각**
         처리한다 — 예외로 빠져나가면 남은 체결이 장부·킬스위치에서 영영 사라진다.
@@ -263,25 +318,30 @@ class OrderManager:
         가른다. 조각마다 한 거래로 세면 3분할 손절 한 번이 연속손절 3회가 된다.
         ``record_trade`` 도 손익을 더하므로 마지막 조각 손익만 넘긴다(이중 합산 방지).
         """
-        fills = self.broker.poll_fills()
+        try:
+            polled = self.broker.poll_fills()
+        except Exception as e:
+            self._log_row(
+                {
+                    "ts": self._clock().isoformat(sep=" ", timespec="seconds"),
+                    "event": "poll_fills_failed",
+                    "error": f"{type(e).__name__}: {e}",
+                }
+            )
+            return []
+        fills: list[Fill] = []
+        for fill in polled:
+            if self._own_orders_only and normalize_ord_no(fill.ord_no) not in self.own_orders:
+                self.foreign_fills.append(fill)
+                self._log_row({**self._fill_row(fill), "event": "foreign_fill"})
+                continue
+            fills.append(fill)
         for fill in fills:
             try:
                 realized = self.book.apply(fill)
             except ValueError as e:
                 self.unmatched_fills.append(fill)
-                self._log_row(
-                    {
-                        "ts": self._clock().isoformat(sep=" ", timespec="seconds"),
-                        "event": "unmatched_fill",
-                        "ord_no": fill.ord_no,
-                        "code": fill.code,
-                        "side": fill.side,
-                        "qty": fill.qty,
-                        "price": fill.price,
-                        "fill_ts": fill.ts.isoformat(),
-                        "error": str(e),
-                    }
-                )
+                self._log_row({**self._fill_row(fill), "event": "unmatched_fill", "error": str(e)})
                 continue
             if fill.side != "sell":
                 continue
@@ -339,6 +399,17 @@ class OrderManager:
             self._log_failure("open_orders_failed", code, e)
             return 0
 
+    def _fill_row(self, fill: Fill) -> dict[str, object]:
+        return {
+            "ts": self._clock().isoformat(sep=" ", timespec="seconds"),
+            "ord_no": fill.ord_no,
+            "code": fill.code,
+            "side": fill.side,
+            "qty": fill.qty,
+            "price": fill.price,
+            "fill_ts": fill.ts.isoformat(),
+        }
+
     def _log_failure(self, event: str, code: str, exc: Exception) -> None:
         self._log_row(
             {
@@ -370,8 +441,17 @@ class OrderManager:
             return_msg=f"{type(exc).__name__}: {exc}",
         )
 
-    def _finish(self, result: OrderResult, status: OrderStatus | None = None) -> ManagedResult:
+    def _finish(
+        self, result: OrderResult, status: OrderStatus | None = None, *, track: bool = False
+    ) -> ManagedResult:
         managed = ManagedResult(result=result, status=status or _status_of(result))
+        # 취소는 넣지 않는다 — 남의 주문을 취소한 기록이 그 주문을 "내 것"으로 만들면 안 된다.
+        if (
+            track
+            and managed.status in (OrderStatus.SUBMITTED, OrderStatus.UNKNOWN)
+            and result.ord_no
+        ):
+            self.own_orders.add(normalize_ord_no(result.ord_no))
         row = {**result.to_record(ts=self._clock()), "status": str(managed.status)}
         if result.return_msg:
             row["return_msg"] = result.return_msg

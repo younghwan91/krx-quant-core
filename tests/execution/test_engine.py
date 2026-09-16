@@ -158,7 +158,10 @@ def _fake_kiwoom(filled_responses: list[dict]) -> SimpleNamespace:
     def empty(**kw):
         return {}
 
-    order_ns = SimpleNamespace(buy_order=empty, sell_order=empty, cancel_order=empty)
+    def buy_order(**kw):
+        return {"return_code": 0, "ord_no": "0000001"}
+
+    order_ns = SimpleNamespace(buy_order=buy_order, sell_order=empty, cancel_order=empty)
     account_ns = SimpleNamespace(
         evaluation_balance_detail=empty, unfilled_orders=empty, filled_orders=filled_orders
     )
@@ -176,9 +179,11 @@ def test_engine_on_kiwoom_broker_only_syncs_and_calls_same_strategy():
         "cntr_pric": "70000",
     }
     api = _fake_kiwoom([{"cntr": []}, {"cntr": [row]}])
-    broker = KiwoomBroker(api, dry_run=False)
+    broker = KiwoomBroker(api, dry_run=False, fills_verified=True)
     strat = _Recorder()
     oms = _oms(broker)
+    # 체결은 이 데몬이 낸 주문(own_orders)의 것만 장부에 반영된다 — 공유 계좌 보호.
+    assert oms.buy(CODE, 3, 70_000, ref_price=70_000).result.ord_no == "0000001"
     eng = EngineCore(strat, oms)
 
     q1 = Quote(T[1], CODE, 70_000, 70_100)

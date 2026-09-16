@@ -179,15 +179,23 @@ from krx_quant_core.backtest.replay import merge_events, run_replay
 
 events = merge_events(bars=daily_bars_df)   # ts, code, open/high/low/close, volume
 result = run_replay(MyStrategy(), events)
-result.fills, result.metrics, result.book.realized_krw
+result.fills, result.trades, result.book.realized_krw   # trades = 청산 원장(매도 fill 당 한 행)
 
 # 실매매 — 같은 전략, KiwoomBroker 위
 broker = KiwoomBroker(api, dry_run=True)   # dry_run=False 는 실주문
+# fills_verified=False(기본): ka10076 체결 조회가 미검증이라 poll_fills/prime 은 [] (경고 1회).
+# 모의계좌 실호출로 필드를 확인한 뒤에만 KiwoomBroker(api, dry_run=False, fills_verified=True).
 guard = OrderGuard(OrderGuardConfig(max_qty=10, price_band_pct=0.05))
-oms = OrderManager(broker, guard=guard, book=PositionBook(journal=Path("data/positions/2026-09-17.jsonl")))
+oms = OrderManager(broker, guard=guard, book=PositionBook(journal=Path("data/positions/2026-09-17.jsonl")),
+                   order_log=Path("logs/orders.jsonl"))
 engine = EngineCore(MyStrategy(), oms)
-engine.feed(Quote(now_kst(), "005930", 70_000, 70_100))   # 웹소켓 이벤트마다 호출
+engine.feed(Quote(now_kst(), "005930", 70_000, 70_100))   # 웹소켓 시세 이벤트마다 호출
+# 체결 동기화는 타이머로 — fills_verified=True 면 feed 마다 조회 REST 가 나가 한도를 넘는다.
+#   loop.call_later / 스레드 타이머 등으로 2초마다: oms.sync()
 ```
+
+> 이름 주의: `execution.Trade` 는 시세 체결 틱 이벤트, `backtest.Trade` 는 청산 원장 한 행이다.
+> 한 파일에서 둘 다 쓰면 `from krx_quant_core.execution import Trade as TradeTick` 처럼 별칭을 쓸 것.
 
 ### 2. simnode 파라미터 스윕
 
@@ -229,11 +237,25 @@ kqc nightly ~/git/scalp-it --only pair-sweep --dry-run
 - **매수는 킬·가드가 막지만 매도(청산)는 막지 않는다.** `OrderManager.sell` 이 막는 건 1주 미만·
   가용 보유(보유 − 걸린 매도 잔량)보다 많이 파는 것·0 이하 지정가, 셋뿐이다. 킬이 걸린 날일수록
   들고 있는 포지션은 빠져나가야 한다 — 청산까지 막으면 실포지션이 감시 없이 남는다.
-- **주문 제출은 재시도하지 않는다.** `KiwoomBroker.submit` 실패는 그대로 `rejected` 로 끝난다 —
-  이중 주문 쪽이 더 위험하다. 조회(미체결·잔고·체결)만 예외 시 1회 재시도한다.
+- **주문 제출은 재시도하지 않는다.** 타임아웃·예외·`return_code` 없는 응답은 `OrderStatus.UNKNOWN`
+  (`"unknown"`) — **나갔는지 모른다, 재시도 금지.** 미체결·잔고로 확인한다. 매수 UNKNOWN 은 일일
+  횟수 한도에 센다(나간 주문을 안 세면 상한을 넘긴다). 브로커가 rc≠0 으로 거부한 것만 `rejected`.
+  조회(미체결·잔고·체결)만 예외 시 1회 재시도한다.
 - **`poll_fills`(`ka10076` 체결 조회)는 미검증이다.** 필드명이 kiwoom-client 에 예시가 없어
-  브리프 추정값을 쓴다 — **모의계좌로 실호출 확인 전에는 실주문 데몬에 쓰지 말 것.**
-  `KiwoomBroker.holdings()`(`kt00018`)·`open_orders()`(`ka10075`)는 검증됐다.
+  브리프 추정값을 쓴다. 그래서 `KiwoomBroker(fills_verified=False)` 가 기본이고, 이때 `poll_fills`·
+  `prime` 은 조회 없이 `[]` 다 — **모의계좌로 실호출 확인 전에는 켜지 말 것.** `OrderManager.sync`
+  는 조회 예외를 `poll_fills_failed` 로그로 남기고 `[]` 를 돌려준다(엔진이 매 이벤트 터지지 않게).
+- **`holdings()`(`kt00018`)·`open_orders()`(`ka10075`)도 전부 검증된 건 아니다.** 특히 `ka10075`
+  의 매수/매도 판별 필드(`io_tp_nm`·`sell_tp_nm`·`sell_tp`)는 실호출 미확인이다. 판별 못 한 행은
+  버리고(`skipped_rows`), 행이 있는데 전부 버려지면 경고 로그를 남긴다 — 조용히 빈 목록이면 매도
+  잔량 예약이 0 이 되어 중복 청산이 나간다.
+- **공유 계좌: 내 주문의 체결만 반영한다.** scalp-it·daytrade-it 이 같은 계좌를 쓰므로 체결 조회에
+  남의 체결이 섞인다. `OrderManager` 는 자기가 낸 주문번호(`own_orders`, `normalize_ord_no` 로 앞자리
+  0 정규화)의 체결만 장부·킬스위치에 넣고, 나머지는 `foreign_fills` 와 `foreign_fill` 로그로 뺀다
+  (`own_orders_only=False` 는 계좌를 혼자 쓸 때만). 주문번호 없이 UNKNOWN 이 된 주문의 체결도 여기로
+  빠진다 — 사람이 확인한다.
+- **재시작하면 메모리 상태는 사라진다(후속 과제).** `own_orders`·분할 청산 누적 손익·킬스위치 상태는
+  복원되지 않는다. 재시작 전 주문의 체결은 `foreign_fills` 로 빠지니 `reconcile()` 로 대사할 것.
 - **`InstanceLock`** 은 같은 계좌를 도는 데몬이 두 번 뜨는 사고(2026-09-15 이중 매수 원인)를
   `flock(LOCK_EX|LOCK_NB)` 로 막는다. 이미 잡혀 있으면 `AlreadyRunning` — 데몬은 이걸 정상 종료로
   다뤄야 한다(재시작 루프가 계속 두 번째 인스턴스를 죽이면 안 된다).
@@ -286,7 +308,7 @@ kqc nightly ~/git/scalp-it --only pair-sweep --dry-run
 ```bash
 uv sync --extra dev
 uv sync --extra dev --extra fast   # numba 경로까지
-uv run pytest -q        # 632 tests
+uv run pytest -q        # 656 tests (extra fast·opt 포함)
 uv run ruff check src tests
 ```
 
@@ -301,7 +323,8 @@ uv run ruff check src tests
   코어 엔진으로 갈아타는 건 수치 동일성 증명이 끝난 부분부터 단계적으로.
 - ETF 호가단위(kiwoom-client 정본 추가 대기). 대기열 모델(`backtest.lob.queue`)은 실주문
   체결로 계속 보정할 것.
-- PyPI 릴리스.
+- `OrderManager` 재시작 복원(`own_orders`·분할 청산 누적·킬 상태), `execution.Trade`/`backtest.Trade`
+  이름 충돌 정리.
 
 ## 라이선스
 

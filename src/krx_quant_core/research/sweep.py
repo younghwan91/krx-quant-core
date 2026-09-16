@@ -13,8 +13,18 @@
 DSR 의 N 은 "시도한 서로 다른 config 수"를 반영해야 하기 때문이다(사람이 세면 부탁이지
 규율이 아니다).
 
-캐시: 같은 git sha·같은 데이터 구간·같은 config 면 이전 결과를 그대로 쓴다(재실행 방지).
-코드나 데이터가 바뀌면(git sha 또는 data 필드가 바뀌면) 키가 바뀌어 다시 계산한다.
+캐시: 같은 git sha·같은 데이터 구간·같은 objective(``모듈.qualname``)·같은 config 면 이전
+결과를 그대로 쓴다(재실행 방지). 코드나 데이터가 바뀌면 키가 바뀌어 다시 계산한다.
+
+- **dirty 트리면 캐시를 통째로 끈다**(읽기·쓰기 모두). 스윕 시작 때 ``git_dirty`` 를 본다.
+  커밋 안 된 변경은 sha 에 안 잡혀, 읽으면 옛 코드 결과를 새 코드 결과로 믿고 쓰면 다음
+  깨끗한 실행이 그 결과를 믿는다.
+- 지표는 JSON 으로 저장한다. numpy 스칼라는 ``.item()``, 배열은 ``list`` 로 재귀 변환하고
+  그 밖에 JSON 으로 못 쓰는 값은 ``TypeError`` — 예전 ``default=str`` 은 배열을 문자열로
+  바꿔 캐시 적중 때 조용히 다른 타입을 돌려줬다. 캐시가 켜져 있으면 첫 실행도 변환된
+  지표를 돌려준다(적중·미적중 결과 모양이 같게).
+- 쓰기는 임시 파일 + ``os.replace`` 로 원자적이다. 읽을 수 없는(손상된) 캐시 파일은 miss 로
+  보고 다시 계산해 덮어쓴다.
 """
 
 from __future__ import annotations
@@ -23,6 +33,7 @@ import hashlib
 import itertools
 import json
 import os
+import tempfile
 from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
@@ -32,7 +43,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from krx_quant_core.runtime.gitstate import git_head, resolve_trials_dir
+from krx_quant_core.runtime.gitstate import git_dirty, git_head, resolve_trials_dir
 from krx_quant_core.runtime.runs import DataSpec, start_run
 from krx_quant_core.stats.sharpe import deflated_sharpe_from_sample
 from krx_quant_core.stats.trials import config_fingerprint, count_trials, record_trial
@@ -54,11 +65,57 @@ def _default_n_jobs() -> int:
     return max(1, min((os.cpu_count() or 2) - 2, cap))
 
 
-def _cache_key(git_sha: str, data: DataSpec, cfg: dict[str, Any]) -> str:
+def _objective_id(objective: Callable[[dict], dict]) -> str:
+    return f"{objective.__module__}.{objective.__qualname__}"
+
+
+def _cache_key(git_sha: str, data: DataSpec, cfg: dict[str, Any], objective_id: str) -> str:
     payload = json.dumps(
-        [git_sha, asdict(data), config_fingerprint(cfg)], default=str, ensure_ascii=False
+        [git_sha, asdict(data), config_fingerprint(cfg), objective_id],
+        default=str,
+        ensure_ascii=False,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _jsonable(value: Any, path: str = "metrics") -> Any:
+    """지표를 JSON 기본형으로 재귀 변환한다. 못 바꾸는 타입은 ``TypeError``(경로 포함)."""
+    if value is None or isinstance(value, str | bool | int | float):
+        return value
+    if isinstance(value, np.ndarray):
+        return _jsonable(value.tolist(), path)
+    if isinstance(value, np.generic):
+        return _jsonable(value.item(), path)
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            if not isinstance(k, str):
+                raise TypeError(f"{path}: JSON 캐시 키는 str 이어야 한다: {k!r}")
+            out[k] = _jsonable(v, f"{path}[{k!r}]")
+        return out
+    if isinstance(value, list | tuple):
+        return [_jsonable(v, f"{path}[{i}]") for i, v in enumerate(value)]
+    raise TypeError(f"{path}: JSON 캐시에 쓸 수 없는 타입 {type(value).__name__}")
+
+
+def _read_cache(path: Path) -> dict[str, Any] | None:
+    try:
+        metrics = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None  # 없음·손상 → miss
+    return metrics if isinstance(metrics, dict) else None
+
+
+def _write_cache(path: Path, metrics: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(metrics, ensure_ascii=False))
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def _run_one(
@@ -76,19 +133,19 @@ def _run_one(
     """
     cache_path = None
     if cache_dir is not None:
-        cache_path = cache_dir / f"{_cache_key(git_sha, data, cfg)}.json"
-        if cache_path.exists():
-            metrics = json.loads(cache_path.read_text(encoding="utf-8"))
-            return {**cfg, **metrics}
+        key = _cache_key(git_sha, data, cfg, _objective_id(objective))
+        cache_path = cache_dir / f"{key}.json"
+        cached = _read_cache(cache_path)
+        if cached is not None:
+            return {**cfg, **cached}
     try:
         metrics = objective(cfg)
     except Exception as exc:  # noqa: BLE001 — 행으로 격리하고 스윕은 계속
         return {**cfg, "error": repr(exc)}
     if cache_path is not None:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(
-            json.dumps(metrics, default=str, ensure_ascii=False), encoding="utf-8"
-        )
+        # 변환 실패(TypeError)는 행으로 삼키지 않는다 — objective 반환 모양의 버그다.
+        metrics = _jsonable(metrics)
+        _write_cache(cache_path, metrics)
     return {**cfg, **metrics}
 
 
@@ -167,7 +224,8 @@ def run_sweep(
         n_jobs = _default_n_jobs()
     logs_dir = resolve_trials_dir(repo_root, trials_dir)
     cache_dir = None
-    if cache:
+    # dirty 트리면 캐시를 읽지도 쓰지도 않는다 — 모듈 docstring 참고.
+    if cache and not git_dirty(repo_root):
         cache_dir = Path(os.environ.get("KQC_CACHE", "~/.kqc/cache")).expanduser() / label
 
     sweep_config = {

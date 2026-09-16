@@ -243,7 +243,7 @@ def test_poll_fills_returns_only_new_increment_across_two_calls():
     }
     filled = _recorder([{"cntr": [row1]}, {"cntr": [row2]}])
     api = _make_api(filled=filled)
-    broker = KiwoomBroker(api, dry_run=False)
+    broker = KiwoomBroker(api, dry_run=False, fills_verified=True)
 
     first = broker.poll_fills()
     second = broker.poll_fills()
@@ -264,7 +264,7 @@ def test_poll_fills_no_new_fill_yields_empty_list():
     row = {"ord_no": "1", "stk_cd": "A005930", "cntr_qty": "10", "cntr_pric": "70000"}
     filled = _recorder([{"cntr": [row]}, {"cntr": [row]}])
     api = _make_api(filled=filled)
-    broker = KiwoomBroker(api, dry_run=False)
+    broker = KiwoomBroker(api, dry_run=False, fills_verified=True)
 
     broker.poll_fills()
     second = broker.poll_fills()
@@ -314,7 +314,7 @@ def test_open_orders_retries_once():
 def test_poll_fills_retries_once():
     filled = _recorder([TimeoutError("blip"), {"cntr": []}])
     api = _make_api(filled=filled)
-    broker = KiwoomBroker(api, dry_run=False)
+    broker = KiwoomBroker(api, dry_run=False, fills_verified=True)
 
     fills = broker.poll_fills()
 
@@ -469,7 +469,7 @@ def test_cancel_non_dict_response_falls_back_to_known_ord_no():
 def test_poll_fills_calls_filled_orders_with_ka10076_body():
     filled = _recorder([{"cntr": []}])
     api = _make_api(filled=filled)
-    broker = KiwoomBroker(api, dry_run=False)
+    broker = KiwoomBroker(api, dry_run=False, fills_verified=True)
 
     broker.poll_fills()
 
@@ -520,7 +520,7 @@ def test_poll_fills_sell_row_via_io_tp_nm():
     }
     filled = _recorder([{"cntr": [row]}])
     api = _make_api(filled=filled)
-    broker = KiwoomBroker(api, dry_run=False)
+    broker = KiwoomBroker(api, dry_run=False, fills_verified=True)
 
     fills = broker.poll_fills()
 
@@ -532,7 +532,7 @@ def test_poll_fills_skips_unknown_side_row_and_counts_it():
     row = {"ord_no": "1", "stk_cd": "A005930", "cntr_qty": "5", "cntr_pric": "70000"}
     filled = _recorder([{"cntr": [row]}])
     api = _make_api(filled=filled)
-    broker = KiwoomBroker(api, dry_run=False)
+    broker = KiwoomBroker(api, dry_run=False, fills_verified=True)
 
     fills = broker.poll_fills()
 
@@ -550,7 +550,7 @@ def test_prime_records_baseline_without_emitting_fills():
     }
     filled = _recorder([{"cntr": [row]}, {"cntr": [row]}])
     api = _make_api(filled=filled)
-    broker = KiwoomBroker(api, dry_run=False)
+    broker = KiwoomBroker(api, dry_run=False, fills_verified=True)
 
     broker.prime()
     fills = broker.poll_fills()
@@ -571,7 +571,7 @@ def test_poll_fills_sums_multiple_rows_same_order_in_one_response():
     ]
     filled = _recorder([{"cntr": rows}])
     api = _make_api(filled=filled)
-    broker = KiwoomBroker(api, dry_run=False)
+    broker = KiwoomBroker(api, dry_run=False, fills_verified=True)
 
     fills = broker.poll_fills()
 
@@ -591,7 +591,7 @@ def test_poll_fills_normalizes_leading_zero_ord_no_across_calls():
     }
     filled = _recorder([{"cntr": [row1]}, {"cntr": [row2]}])
     api = _make_api(filled=filled)
-    broker = KiwoomBroker(api, dry_run=False)
+    broker = KiwoomBroker(api, dry_run=False, fills_verified=True)
 
     first = broker.poll_fills()
     second = broker.poll_fills()
@@ -611,10 +611,66 @@ def test_poll_fills_resets_cumulative_on_new_kst_day(monkeypatch):
     }
     filled = _recorder([{"cntr": [row]}, {"cntr": [row]}])
     api = _make_api(filled=filled)
-    broker = KiwoomBroker(api, dry_run=False)
+    broker = KiwoomBroker(api, dry_run=False, fills_verified=True)
 
     first = broker.poll_fills()
     second = broker.poll_fills()
 
     assert first[0].qty == 10
     assert second[0].qty == 10  # 날짜가 바뀌어 누적이 초기화됨 — 같은 10이 다시 신규로 잡힌다
+
+
+# ----- 최종 리뷰(v0.5.0) --------------------------------------------------------
+
+
+def test_poll_fills_and_prime_off_until_fills_verified(caplog):
+    row = {
+        "ord_no": "1", "stk_cd": "A005930", "io_tp_nm": "매수",
+        "cntr_qty": "4", "cntr_pric": "70000",
+    }
+    filled = _recorder([{"cntr": [row]}, {"cntr": [row]}])
+    api = _make_api(filled=filled)
+    broker = KiwoomBroker(api, dry_run=False)  # fills_verified=False 기본
+
+    with caplog.at_level("WARNING", logger="krx_quant_core.execution.kiwoom_broker"):
+        broker.prime()
+        assert broker.poll_fills() == []
+        assert broker.poll_fills() == []
+    assert filled.calls == []  # 미검증 조회는 아예 부르지 않는다
+    warns = [r for r in caplog.records if "fills_verified" in r.getMessage()]
+    assert len(warns) == 1  # 한 번만 경고
+
+
+def test_dry_run_property():
+    assert KiwoomBroker(_make_api()).dry_run is True
+    assert KiwoomBroker(_make_api(), dry_run=False).dry_run is False
+
+
+def test_open_orders_all_rows_unknown_side_logs_warning(caplog):
+    rows = [
+        {"ord_no": "1", "stk_cd": "A005930", "ord_qty": "1", "oso_qty": "1", "ord_pric": "1"},
+        {"ord_no": "2", "stk_cd": "A000660", "ord_qty": "1", "oso_qty": "1", "ord_pric": "1"},
+    ]
+    api = _make_api(unfilled=_recorder([{"oso": rows}]))
+    broker = KiwoomBroker(api, dry_run=False)
+    with caplog.at_level("WARNING", logger="krx_quant_core.execution.kiwoom_broker"):
+        assert broker.open_orders() == []
+    assert broker.skipped_rows == 2
+    assert any("open_orders" in r.getMessage() for r in caplog.records)
+
+
+def test_open_orders_empty_response_no_warning(caplog):
+    broker = KiwoomBroker(_make_api(unfilled=_recorder([{"oso": []}])), dry_run=False)
+    with caplog.at_level("WARNING", logger="krx_quant_core.execution.kiwoom_broker"):
+        assert broker.open_orders() == []
+    assert caplog.records == []
+
+
+def test_normalize_ord_no_public():
+    from krx_quant_core.execution.events import normalize_ord_no
+
+    assert normalize_ord_no("0000123") == "123"
+    assert normalize_ord_no(" 0042 ") == "42"
+    assert normalize_ord_no("0000000") == "0000000"
+    assert normalize_ord_no("P000001") == "P000001"
+    assert not hasattr(kb, "_norm_ord_no")

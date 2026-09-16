@@ -9,7 +9,7 @@
 from .book import PositionBook
 from .broker import Broker
 from .engine import Bar, EngineCore, Event, Quote, Strategy, StrategyContext, Trade
-from .events import Fill, Holding, OpenOrder, OrderStatus
+from .events import Fill, Holding, OpenOrder, OrderStatus, normalize_ord_no
 from .guards import (
     OrderGuard,
     OrderGuardConfig,
@@ -53,5 +53,6 @@ __all__ = [
     "count_limit_reason",
     "evaluate_order",
     "holdings_block_reason",
+    "normalize_ord_no",
     "strip_sign",
 ]

@@ -11,7 +11,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
-__all__ = ["Fill", "Holding", "OpenOrder", "OrderStatus"]
+__all__ = ["Fill", "Holding", "OpenOrder", "OrderStatus", "normalize_ord_no"]
 
 
 class OrderStatus(StrEnum):
@@ -23,6 +23,22 @@ class OrderStatus(StrEnum):
     FILLED = "filled"
     CANCELED = "canceled"
     REJECTED = "rejected"
+    #: 주문이 나갔는지 모른다 — 재시도 금지, 미체결/잔고로 확인. 브로커 호출이 예외로
+    #: 끝났거나(타임아웃 등) 제출 응답에 ``return_code`` 가 없을 때. 거부(REJECTED)로
+    #: 읽으면 호출부가 "안 나갔다"고 믿고 다시 내 이중 주문이 된다.
+    UNKNOWN = "unknown"
+
+
+def normalize_ord_no(s: str) -> str:
+    """주문번호 비교 키 — 선행 0 을 뗀다(``"0000123"`` → ``"123"``).
+
+    키움은 같은 주문번호를 응답마다 0 패딩을 달리해 줄 수 있어, 원문 비교로는 "내 주문"
+    판별(:class:`~.oms.OrderManager`)과 누적 체결 추적(``KiwoomBroker``)이 조용히 어긋난다.
+    전부 0 인 입력은 지워지지 않게 원문(공백 제거)을 돌려준다. ``PaperBroker`` 의
+    ``"P000001"`` 같은 번호는 0 으로 시작하지 않으니 그대로다.
+    """
+    text = str(s if s is not None else "").strip()
+    return text.lstrip("0") or text
 
 
 @dataclass(frozen=True)

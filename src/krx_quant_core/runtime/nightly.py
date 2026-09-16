@@ -56,14 +56,21 @@ class JobResult:
 
 
 def load_jobs(repo_root: Path | str) -> list[Job]:
-    """``<repo_root>/research/nightly.toml`` 을 읽는다. 파일이 없으면 빈 리스트."""
+    """``<repo_root>/research/nightly.toml`` 을 읽는다. 파일이 없으면 빈 리스트.
+
+    ``name``·``cmd`` 가 빠진 job 은 몇 번째(0부터)인지 담아 ``ValueError``.
+    """
     path = Path(repo_root) / "research" / "nightly.toml"
     if not path.is_file():
         return []
     with path.open("rb") as f:
         data = tomllib.load(f)
     jobs = []
-    for raw in data.get("job", []):
+    for i, raw in enumerate(data.get("job", [])):
+        for key in ("name", "cmd"):
+            if key not in raw:
+                # KeyError('name') 로는 toml 의 몇 번째 job 이 틀렸는지 모른다.
+                raise ValueError(f"{path}: job[{i}] 에 {key!r} 가 없다")
         jobs.append(
             Job(
                 name=raw["name"],
@@ -119,6 +126,9 @@ def run_nightly(
     except RuntimeError as exc:
         raise RunRefused(str(exc)) from exc
     repo_root = Path(repo_root)
+    if not repo_root.is_dir():
+        # 없는 경로면 load_jobs 가 조용히 [] 를 돌려 cron 이 "job 0개 성공"으로 끝난다.
+        raise ValueError(f"repo_root 가 디렉터리가 아니다: {repo_root}")
     all_jobs = load_jobs(repo_root)
     jobs = [j for j in all_jobs if only is None or j.name == only]
     if only is not None and not jobs:
@@ -149,6 +159,7 @@ def run_nightly(
 
     summary_path = date_dir / f"{repo_name}.json"
     summary_path.write_text(
-        json.dumps([asdict(r) for r in results], ensure_ascii=False, indent=2) + "\n"
+        json.dumps([asdict(r) for r in results], ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
     )
     return results

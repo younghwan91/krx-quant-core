@@ -195,3 +195,44 @@ def test_cli_nightly_exit_code(tmp_path, monkeypatch, capsys):
     assert cli.main(["nightly", "repo"]) == 1  # 실패 2건이어도 최대 1
     out = capsys.readouterr().out
     assert "ok-job" in out and "fail-job" in out and "weekend" in out
+
+
+# ----- 최종 리뷰(v0.5.0) --------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("body", "missing"),
+    [('[[job]]\nname = "a"\ncmd = ["true"]\n\n[[job]]\ncmd = ["true"]\n', "name"),
+     ('[[job]]\nname = "a"\n', "cmd")],
+)
+def test_load_jobs_missing_name_or_cmd_names_job_index(tmp_path, body, missing):
+    (tmp_path / "research").mkdir()
+    (tmp_path / "research" / "nightly.toml").write_text(body)
+    idx = 1 if missing == "name" else 0
+    with pytest.raises(ValueError, match=rf"job\[{idx}\].*{missing}"):
+        ni.load_jobs(tmp_path)
+
+
+def test_run_nightly_missing_repo_root_raises(tmp_path, monkeypatch):
+    _sim(monkeypatch)
+    with pytest.raises(ValueError, match="repo_root"):
+        ni.run_nightly(tmp_path / "nope", out_root=tmp_path / "out", today=MONDAY)
+
+
+def test_run_nightly_summary_is_utf8(tmp_path, monkeypatch):
+    _sim(monkeypatch)
+    repo = tmp_path / "레포"
+    (repo / "research").mkdir(parents=True)
+    (repo / "research" / "nightly.toml").write_text('[[job]]\nname = "잡"\ncmd = ["true"]\n')
+    seen: list[object] = []
+    real = Path.write_text
+
+    def spy(self, data, encoding=None, errors=None, newline=None):
+        seen.append(encoding)
+        return real(self, data, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(Path, "write_text", spy)
+    ni.run_nightly(repo, out_root=tmp_path / "out", today=MONDAY, dry_run=True)
+    assert seen == ["utf-8"]  # 로케일이 UTF-8 이 아닌 cron 환경에서도 한글 job 이름이 안 깨진다
+    summary = tmp_path / "out" / MONDAY.isoformat() / "레포.json"
+    assert json.loads(summary.read_bytes().decode("utf-8"))[0]["name"] == "잡"

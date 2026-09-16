@@ -191,3 +191,151 @@ def test_optuna_search_isolates_objective_exceptions(repo):
     assert (ok_rows["thr"] <= 0.5).all()
     best = result.best("score")
     assert best["config"]["thr"] <= 0.5
+
+
+# ----- 최종 리뷰(v0.5.0): 캐시 --------------------------------------------------
+
+
+def _calls(log: Path) -> int:
+    return len(log.read_text().splitlines()) if log.exists() else 0
+
+
+def objective_other(cfg: dict) -> dict:
+    log = os.environ.get("KQC_CALL_LOG")
+    if log:
+        with Path(log).open("a", encoding="utf-8") as fh:
+            fh.write("1\n")
+    return {"score": -cfg["thr"]}
+
+
+def objective_numpy(cfg: dict) -> dict:
+    return {
+        "score": np.float64(cfg["thr"]),
+        "n": np.int64(3),
+        "arr": np.array([1.5, 2.5]),
+        "nested": {"flag": np.bool_(True), "xs": [np.int32(1), (np.float32(0.5),)]},
+    }
+
+
+class _Opaque:
+    pass
+
+
+def objective_unserializable(cfg: dict) -> dict:
+    return {"score": 1.0, "obj": _Opaque()}
+
+
+def _cache_files(tmp_path: Path, label: str) -> list[Path]:
+    d = tmp_path / "cache" / label
+    return sorted(d.iterdir()) if d.exists() else []
+
+
+def test_dirty_tree_skips_cache_read_and_write(repo, monkeypatch, tmp_path):
+    log = tmp_path / "calls.log"
+    monkeypatch.setenv("KQC_CALL_LOG", str(log))
+    configs = grid(thr=[0.1, 0.2])
+    run_sweep(objective_ok, configs, label="dirty", repo_root=repo, data=DATA, n_jobs=1)
+    assert _calls(log) == 2 and len(_cache_files(tmp_path, "dirty")) == 2
+    (repo / "a.py").write_text("x = 2\n")  # 커밋 안 된 변경 — 같은 sha 인데 코드가 다르다
+    for _ in range(2):
+        run_sweep(
+            objective_ok, configs, label="dirty", repo_root=repo, data=DATA, n_jobs=1,
+            allow_dirty=True,
+        )
+    assert _calls(log) == 6  # 캐시를 읽지도 쓰지도 않는다
+    assert len(_cache_files(tmp_path, "dirty")) == 2
+
+
+def test_numpy_metrics_are_cached_as_plain_json(repo):
+    configs = grid(thr=[0.1])
+    r1 = run_sweep(objective_numpy, configs, label="np", repo_root=repo, data=DATA, n_jobs=1)
+    r2 = run_sweep(objective_numpy, configs, label="np", repo_root=repo, data=DATA, n_jobs=1)
+    for r in (r1, r2):
+        row = r.frame.iloc[0]
+        assert row["arr"] == [1.5, 2.5]
+        assert row["nested"] == {"flag": True, "xs": [1, [0.5]]}
+        assert row["score"] == pytest.approx(0.1) and row["n"] == 3
+
+
+def test_unserializable_metrics_raise_type_error(repo):
+    with pytest.raises(TypeError, match="_Opaque"):
+        run_sweep(
+            objective_unserializable, grid(thr=[0.1]), label="bad", repo_root=repo, data=DATA,
+            n_jobs=1,
+        )
+
+
+def test_cache_key_includes_objective_identity(repo, monkeypatch, tmp_path):
+    log = tmp_path / "calls.log"
+    monkeypatch.setenv("KQC_CALL_LOG", str(log))
+    configs = grid(thr=[0.1])
+    a = run_sweep(objective_ok, configs, label="ident", repo_root=repo, data=DATA, n_jobs=1)
+    b = run_sweep(objective_other, configs, label="ident", repo_root=repo, data=DATA, n_jobs=1)
+    assert _calls(log) == 2
+    assert a.frame["score"].iloc[0] == pytest.approx(1.0)
+    assert b.frame["score"].iloc[0] == pytest.approx(-0.1)
+
+
+def test_cache_write_is_atomic_and_corrupt_file_is_a_miss(repo, monkeypatch, tmp_path):
+    import krx_quant_core.research.sweep as sw
+
+    replaced: list[tuple[str, str]] = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        replaced.append((str(src), str(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(sw.os, "replace", spy)
+    log = tmp_path / "calls.log"
+    monkeypatch.setenv("KQC_CALL_LOG", str(log))
+    configs = grid(thr=[0.1])
+    run_sweep(objective_ok, configs, label="atomic", repo_root=repo, data=DATA, n_jobs=1)
+    files = _cache_files(tmp_path, "atomic")
+    assert len(files) == 1 and files[0].suffix == ".json"
+    assert len(replaced) == 1 and replaced[0][1] == str(files[0])
+
+    files[0].write_text('{"score": 1.', encoding="utf-8")  # 쓰다 죽은 파일
+    r = run_sweep(objective_ok, configs, label="atomic", repo_root=repo, data=DATA, n_jobs=1)
+    assert _calls(log) == 2  # 손상 파일은 miss — 다시 계산
+    assert r.frame["score"].iloc[0] == pytest.approx(1.0)
+    assert "error" not in r.frame.columns
+    import json as _json
+
+    assert _json.loads(files[0].read_text(encoding="utf-8")) == {"score": 1.0}
+
+
+def test_optuna_missing_metric_is_error_row(repo):
+    pytest.importorskip("optuna")
+    from krx_quant_core.research.optuna import optuna_search
+
+    def space(trial):
+        return {"thr": trial.suggest_float("thr", 0.1, 0.9)}
+
+    def objective(cfg):
+        return {"other": cfg["thr"]}
+
+    result = optuna_search(
+        objective, space, label="opt-miss", repo_root=repo, data=DATA, n_trials=3, seed=0
+    )
+    assert len(result.frame) == 3
+    assert result.frame["error"].notna().all()
+    assert "score" in result.frame["error"].iloc[0]
+
+
+def test_optuna_search_trials_dir(repo):
+    pytest.importorskip("optuna")
+    from krx_quant_core.research.optuna import optuna_search
+
+    def space(trial):
+        return {"thr": trial.suggest_float("thr", 0.1, 0.9)}
+
+    def objective(cfg):
+        return {"score": cfg["thr"]}
+
+    result = optuna_search(
+        objective, space, label="opt-td", repo_root=repo, data=DATA, n_trials=2, seed=0,
+        trials_dir="research/logs",
+    )
+    assert result.n_trials == 3
+    assert count_trials("opt-td", logs_dir=repo / "research" / "logs") == 3
