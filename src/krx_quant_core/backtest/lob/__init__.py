@@ -18,6 +18,16 @@ from .features import (
     compute_features,
     forward_labels,
 )
+from .features_v2 import (
+    FEATURE_SET_V2,
+    FEATURE_SET_V2_EXCLUDED,
+    INPUT_COLUMNS_V2,
+    STEP_COLUMNS_V2,
+    SecondFeatureStreamV2,
+    aggregate_seconds_v2,
+    compute_features_v2,
+    cross_section_ranks_v2,
+)
 from .grid import (
     FEATURE_COLUMNS,
     PATH_KEYS,
@@ -66,6 +76,14 @@ __all__ = [
     "EXIT_TAKE",
     "EXIT_TIME",
     "FEATURE_COLUMNS",
+    "FEATURE_SET_V2",
+    "FEATURE_SET_V2_EXCLUDED",
+    "INPUT_COLUMNS_V2",
+    "STEP_COLUMNS_V2",
+    "SecondFeatureStreamV2",
+    "aggregate_seconds_v2",
+    "compute_features_v2",
+    "cross_section_ranks_v2",
     "HAVE_NUMBA",
     "INPUT_COLUMNS",
     "PATH_KEYS",
