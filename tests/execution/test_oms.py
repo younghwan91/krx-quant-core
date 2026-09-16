@@ -472,3 +472,27 @@ def test_exception_result_not_ok_even_for_dry_run_broker():
     ):
         assert mr.status is OrderStatus.REJECTED
         assert mr.result.dry_run is False and mr.result.ok is False
+
+
+# ------------------------------------------------------------------ review round 3
+
+
+class _HoldingsFailBroker(PaperBroker):
+    def holdings(self):
+        raise ConnectionError("down")
+
+
+def test_sell_survives_holdings_failure(tmp_path):
+    log = tmp_path / "orders.jsonl"
+    broker = _HoldingsFailBroker(holdings={CODE: Holding(CODE, 5, 10_000.0)})
+    om, _, _, _, _ = _oms(broker=broker, order_log=log)
+    mr = om.sell(CODE, 5, 10_000)
+    assert mr.status is OrderStatus.SUBMITTED
+    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    failed = [r for r in rows if r.get("event") == "holdings_failed"]
+    assert len(failed) == 1
+    assert failed[0]["code"] == CODE and failed[0]["error"] == "ConnectionError: down"
+    assert rows[-1]["status"] == "submitted"
+    # 수량·가격 검사는 그대로 선다
+    assert om.sell(CODE, 0, 10_000).result.blocked_reason == "청산 수량이 1주 미만: 0"
+    assert om.sell(CODE, 1, 0).result.blocked_reason == "지정가가 0 이하: 0"

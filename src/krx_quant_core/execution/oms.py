@@ -204,7 +204,8 @@ class OrderManager:
         """청산. **킬·가드로 막지 않는다** — 막으면 실포지션이 무감시로 남는다.
 
         막는 것: 1주 미만, 가용 보유 초과, 0 이하 지정가. 가용 보유 = 보유 − 브로커에
-        이미 걸린 매도 잔량(같은 포지션을 두 번 청산 주문하는 사고 방지).
+        이미 걸린 매도 잔량(같은 포지션을 두 번 청산 주문하는 사고 방지). 잔고·미체결
+        조회가 예외면 order_log 에 남기고 그 검사만 건너뛴다(청산 경로는 죽지 않는다).
 
         보유는 **장부가 있으면 장부가 우선**이고, 장부에 없을 때만 브로커 보유를 본다
         (재시작 직후 장부가 비어 있어도 실계좌 포지션은 청산할 수 있어야 한다). 그래서
@@ -219,35 +220,13 @@ class OrderManager:
         intent = OrderIntent(side="sell", code=code, qty=qty, price=price)
         if qty < 1:
             return self._finish(self._blocked(intent, f"청산 수량이 1주 미만: {qty}"))
-        pos = self.book.position(code)
-        if pos is not None:
-            held = pos.qty
-        else:
-            broker_pos = self.broker.holdings().get(code)
-            held = broker_pos.qty if broker_pos is not None else 0
-        try:
-            pending = sum(
-                o.remaining
-                for o in self.broker.open_orders()
-                if o.code == code and o.side == "sell"
-            )
-        except Exception as e:
-            # 미체결 조회가 실패했다고 청산을 막으면 포지션이 무감시로 남는다. 예약 없이
-            # 내보낸다 — 실제 초과 매도는 브로커(증권사)가 보유 부족으로 거부한다.
-            pending = 0
-            self._log_row(
-                {
-                    "ts": self._clock().isoformat(sep=" ", timespec="seconds"),
-                    "event": "open_orders_failed",
-                    "code": code,
-                    "error": f"{type(e).__name__}: {e}",
-                }
-            )
-        available = held - pending
-        if qty > available:
-            return self._finish(
-                self._blocked(intent, f"청산 수량이 보유 초과: {qty} > {available}")
-            )
+        held = self._held_for_exit(code)
+        if held is not None:
+            available = held - self._pending_sell_qty(code)
+            if qty > available:
+                return self._finish(
+                    self._blocked(intent, f"청산 수량이 보유 초과: {qty} > {available}")
+                )
         if price <= 0:
             return self._finish(self._blocked(intent, f"지정가가 0 이하: {price}"))
         try:
@@ -331,6 +310,44 @@ class OrderManager:
         )
 
     # ----- 내부 --------------------------------------------------------------
+
+    def _held_for_exit(self, code: str) -> int | None:
+        """청산 한도용 보유. 장부 우선, 없으면 브로커. 브로커 조회 실패면 ``None``.
+
+        ``None`` 이면 보유 검사를 건너뛴다 — 잔고 조회가 실패했다고 청산을 막으면
+        포지션이 무감시로 남는다. 실제 초과 매도는 브로커(증권사)가 보유 부족으로 거부한다.
+        """
+        pos = self.book.position(code)
+        if pos is not None:
+            return pos.qty
+        try:
+            broker_pos = self.broker.holdings().get(code)
+        except Exception as e:
+            self._log_failure("holdings_failed", code, e)
+            return None
+        return broker_pos.qty if broker_pos is not None else 0
+
+    def _pending_sell_qty(self, code: str) -> int:
+        """브로커에 걸린 이 종목 매도 잔량. 조회 실패면 0(예약 없이 내보낸다 — 이유는 위와 같다)."""
+        try:
+            return sum(
+                o.remaining
+                for o in self.broker.open_orders()
+                if o.code == code and o.side == "sell"
+            )
+        except Exception as e:
+            self._log_failure("open_orders_failed", code, e)
+            return 0
+
+    def _log_failure(self, event: str, code: str, exc: Exception) -> None:
+        self._log_row(
+            {
+                "ts": self._clock().isoformat(sep=" ", timespec="seconds"),
+                "event": event,
+                "code": code,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        )
 
     def _blocked(self, intent: OrderIntent, reason: str) -> OrderResult:
         return OrderResult(
