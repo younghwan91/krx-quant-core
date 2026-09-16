@@ -12,13 +12,21 @@
 - **부분 체결 없음** — 판정에 걸리면 잔량 전체가 한 번에 체결된다.
 - **비용은 장부(``PositionBook``) 몫** — 여기서는 체결가를 그대로 낸다. 수수료·세금·
   슬리피지를 빼지 않는다.
+- **매수 현금 잔고 확인 없음** — 이 브로커는 보유 수량만 안다. 계좌 현금이 충분한지는
+  호출자(``OrderManager``) 또는 장부(``PositionBook``) 몫이다.
 - 도착시각 이전에 들어온 시세는 그 주문 판정에 안 쓴다(``latency_sec``). 그 종목의
-  시세를 아직 한 번도 못 봤다면 latency 를 더할 기준이 없으니, 주문 뒤 처음 들어오는
-  시세부터 바로 판정한다.
+  시세를 주문 시점까지 한 번도 못 봤다면, 주문 뒤 처음 들어오는 시세에 도착시각을
+  고정한다(그 시세 ts + latency) — latency 가 0 이면 그 시세 자신이 바로 도착이고,
+  0 보다 크면 그 시세는 도착 전이라 판정에서 빠진다(다음 시세부터).
+- 테이커 체결가는 ``int(round(...))`` 로 반올림한다 — KRX 시세는 원래 정수(원) 호가라
+  일반적으로는 그대로지만, 방어적으로 반올림한다.
+- 호가(``bid``/``ask``)가 없거나(0 이하) 유한하지 않으면(NaN/inf) 그 쪽은 "없다"로
+  본다 — 테이커 판정에 안 쓴다. ``last`` 도 같은 기준으로 없으면 대기 판정에 안 쓴다.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -30,14 +38,24 @@ from .orders import OrderIntent, OrderResult
 __all__ = ["PaperBroker"]
 
 
+def _is_valid_quote(value: float | None) -> bool:
+    """호가/체결가 하나가 "있다"고 볼 수 있나 — 유한하고 0 보다 커야 한다.
+
+    호가창이 비었을 때 호출자가 0 을 채워 보낼 수 있다(book 센티널). 0 을 진짜
+    매도 1호가로 읽으면 공짜로 체결시키는 사고가 난다. NaN/inf 도 마찬가지로 걸러낸다.
+    """
+    return value is not None and math.isfinite(value) and value > 0
+
+
 @dataclass
 class _Pending:
     """대기 중인 주문 1건의 내부 상태."""
 
     intent: OrderIntent
     ord_no: str
-    #: ``None`` 이면 "이 종목 시세를 아직 한 번도 못 본 채로 주문했다" — 다음에 들어오는
-    #: 첫 시세부터 바로 판정한다(latency 를 더할 기준 시각이 없으므로).
+    #: ``None`` 이면 "아직 도착시각을 못 정했다" — 주문 시점에 이 종목 시세를 한 번도
+    #: 못 봐서다. 다음에 들어오는 첫 시세에서 ``ts + latency_sec`` 로 고정한다(그
+    #: 시세 자신은 latency 가 0 초과면 도착 전이라 판정 대상이 아니다).
     arrival_ts: datetime | None
 
 
@@ -93,7 +111,11 @@ class PaperBroker:
         )
 
     def cancel(self, ord_no: str, intent: OrderIntent) -> OrderResult:
-        """대기 중이면 큐에서 뺀다. 없으면 실패로 돌려준다."""
+        """대기 중이면 큐에서 뺀다. 없으면 실패로 돌려준다.
+
+        ``submitted=True`` 는 "취소 요청을 받아들였다"는 뜻이다 — 실제 주문을 낸
+        것과는 별개다(``OrderResult.submitted`` 의 원래 의미는 신규 주문 제출 기준).
+        """
         if ord_no in self._orders:
             del self._orders[ord_no]
             return OrderResult(intent=intent, dry_run=False, submitted=True, return_code=0)
@@ -140,7 +162,11 @@ class PaperBroker:
             intent = pending.intent
             if intent.code != code:
                 continue
-            if pending.arrival_ts is not None and ts < pending.arrival_ts:
+            if pending.arrival_ts is None:
+                # 주문 시점에 이 종목 시세를 못 봤다 — 지금 이 시세로 도착시각을
+                # 고정한다. latency_sec > 0 이면 이 시세 자신은 도착 전이라 빠진다.
+                pending.arrival_ts = ts + timedelta(seconds=self._latency_sec)
+            if ts < pending.arrival_ts:
                 continue
 
             price = self._judge_fill(intent, bid, ask, last)
@@ -160,16 +186,22 @@ class PaperBroker:
     def _judge_fill(
         self, intent: OrderIntent, bid: float, ask: float, last: float | None
     ) -> int | None:
-        """이번 시세로 ``intent`` 가 채워지면 체결가(정수)를, 아니면 ``None`` 을 돌려준다."""
+        """이번 시세로 ``intent`` 가 채워지면 체결가(정수)를, 아니면 ``None`` 을 돌려준다.
+
+        호가창이 비어(0 이하) 있거나 값이 유한하지 않으면(NaN/inf) 그 쪽은 "없다"로
+        보고 테이커 판정을 건너뛴다 — 0 을 진짜 호가로 오인해 공짜로 체결시키지
+        않기 위해서다. ``last`` 도 같은 기준으로 없으면 대기(through/touch) 판정을
+        건너뛴다.
+        """
         if intent.side == "buy":
-            if ask <= intent.price:
+            if _is_valid_quote(ask) and ask <= intent.price:
                 return int(round(ask))
-            if last is not None and limit_buy_filled(intent.price, last, self._fill_basis):
+            if _is_valid_quote(last) and limit_buy_filled(intent.price, last, self._fill_basis):
                 return int(intent.price)
             return None
-        if bid >= intent.price:
+        if _is_valid_quote(bid) and bid >= intent.price:
             return int(round(bid))
-        if last is not None and limit_sell_filled(intent.price, last, self._fill_basis):
+        if _is_valid_quote(last) and limit_sell_filled(intent.price, last, self._fill_basis):
             return int(intent.price)
         return None
 

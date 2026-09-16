@@ -143,6 +143,64 @@ def test_cancel_unknown_order_returns_error():
     assert result.return_msg == "paper: 주문 없음"
 
 
+def test_buy_taker_skipped_when_ask_not_positive():
+    broker = PaperBroker()
+    broker.submit(_buy(qty=10, price=10_000))
+
+    # ask==0 은 "호가 없음"(book 센티널) — 공짜로 체결시키면 안 된다. last 도 없다.
+    fills = broker.on_quote(CODE, _ts(0), bid=9_990, ask=0, last=None)
+
+    assert fills == []
+    assert len(broker.open_orders()) == 1
+
+
+def test_sell_taker_skipped_when_bid_not_positive():
+    broker = PaperBroker(holdings={CODE: Holding(code=CODE, qty=10, avg_price=9_000.0)})
+    broker.submit(_sell(qty=10, price=10_000))
+
+    fills = broker.on_quote(CODE, _ts(0), bid=0, ask=10_100, last=None)
+
+    assert fills == []
+    assert len(broker.open_orders()) == 1
+
+
+def test_resting_through_rule_fills_even_when_bid_ask_are_nan():
+    broker = PaperBroker(fill_basis="through")
+    broker.submit(_buy(qty=10, price=10_000))
+
+    fills = broker.on_quote(CODE, _ts(0), bid=float("nan"), ask=float("nan"), last=9_999)
+
+    assert len(fills) == 1
+    assert fills[0].price == 10_000
+
+
+def test_latency_zero_still_fills_on_first_quote_seen_after_submit():
+    broker = PaperBroker(latency_sec=0.0)
+    broker.submit(_buy(qty=10, price=10_000))  # 이 종목 시세를 아직 한 번도 못 봤다.
+
+    fills = broker.on_quote(CODE, _ts(0), bid=9_990, ask=9_995, last=9_993)
+
+    assert len(fills) == 1
+
+
+def test_latency_positive_excludes_the_anchoring_quote_itself():
+    broker = PaperBroker(latency_sec=2.0)
+    broker.submit(_buy(qty=10, price=10_000))  # 이 종목 시세를 아직 한 번도 못 봤다.
+
+    # 첫 시세가 도착시각(ts(0)+2s) 을 고정한다 — 마켓어블이어도 이 시세 자신은 제외.
+    fills0 = broker.on_quote(CODE, _ts(0), bid=9_990, ask=9_995, last=9_993)
+    assert fills0 == []
+    assert len(broker.open_orders()) == 1
+
+    # 도착 전.
+    fills1 = broker.on_quote(CODE, _ts(1), bid=9_990, ask=9_995, last=9_993)
+    assert fills1 == []
+
+    # 도착.
+    fills2 = broker.on_quote(CODE, _ts(2), bid=9_990, ask=9_995, last=9_993)
+    assert len(fills2) == 1
+
+
 def test_poll_fills_drains_incrementally():
     broker = PaperBroker()
     broker.submit(_buy(qty=10, price=10_000))
