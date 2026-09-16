@@ -50,7 +50,7 @@ class Broker(Protocol):
 - 도착 즉시 반대 호가가 지정가 이내면 반대 호가에 전량 체결(테이커). 아니면 대기 → 이후 `on_quote` 마다
   `backtest.fills.limit_buy_filled/limit_sell_filled(fill_basis)` 로 판정해 지정가에 체결. 기본 `fill_basis="through"`(보수).
 - `latency_sec`(기본 0): 주문 뒤 이 초가 지난 첫 시세부터 판정한다.
-- 보유 부족 매도는 `rejected`. 비용은 브로커가 빼지 않는다(장부 몫).
+- 보유 부족 매도는 `blocked`(사유 `paper: 보유 부족`). 비용은 브로커가 빼지 않는다(장부 몫).
 - `ord_no` 는 `P000001` 부터 순번.
 
 ### 3.4 `execution/kiwoom_broker.py` — `KiwoomBroker`
