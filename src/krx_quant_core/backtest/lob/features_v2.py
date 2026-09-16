@@ -305,6 +305,7 @@ def _extreme(
 @njit
 def _same_size_val(
     ptr: NDArray[np.int64],
+    ptr_t0: int,
     price: NDArray[np.float64],
     vol: NDArray[np.float64],
     side: NDArray[np.float64],
@@ -312,8 +313,8 @@ def _same_size_val(
 ) -> float:
     """83번 ``_window_trade_stats`` 의 ``same_val`` — 최근 10초 매수 체결 중 가장 많이 반복된
     수량(동률이면 작은 수량) × 반복 횟수 × 창 안 마지막 매수 체결가."""
-    lo = ptr[max(0, t - (_SAME_WIN - 1))]
-    hi = ptr[t + 1]
+    lo = ptr[max(0, t - (_SAME_WIN - 1)) - ptr_t0]
+    hi = ptr[t + 1 - ptr_t0]
     if hi == lo:
         return 0.0
     vols = np.empty(hi - lo)
@@ -345,6 +346,7 @@ def _same_size_val(
 def step_v2(
     x: NDArray[np.float64],
     ptr: NDArray[np.int64],
+    ptr_t0: int,
     price: NDArray[np.float64],
     vol: NDArray[np.float64],
     side: NDArray[np.float64],
@@ -357,7 +359,9 @@ def step_v2(
 ) -> None:
     """한 초 전진. ``x``(:data:`INPUT_COLUMNS_V2`) + 체결 CSR → ``out``(:data:`STEP_COLUMNS_V2`).
 
-    그 초(``t = state[0]``)의 체결은 ``ptr[t]:ptr[t+1]``, 최근 10초 창은 ``ptr[t-9]`` 부터 읽는다.
+    그 초(``t = state[0]``)의 체결은 ``ptr[t-ptr_t0]:ptr[t+1-ptr_t0]``, 최근 10초 창은
+    ``ptr[max(0, t-9)-ptr_t0]`` 부터 읽는다. 배치는 하루치 CSR 에 ``ptr_t0=0``, 실시간은 최근
+    10초만 남긴 버퍼에 ``ptr_t0=max(0, t-9)`` 를 넘긴다 — 읽는 체결은 같다.
     ``out`` 의 ``np.log1p`` 열은 **아직 원값**이다 — 호출부가 :data:`_LOG_IDX` 에 건다.
     """
     t = int(state[_S_T])
@@ -374,8 +378,8 @@ def step_v2(
     nbuy = 0
     bhi = np.nan
     blo = np.nan
-    p0 = ptr[t]
-    p1 = ptr[t + 1]
+    p0 = ptr[t - ptr_t0]
+    p1 = ptr[t + 1 - ptr_t0]
     for i in range(p0, p1):
         pr = price[i]
         v = pr * vol[i]
@@ -473,7 +477,7 @@ def step_v2(
     out[_O_NTR10] = _rsum(hist, _H_CNTR, c_ntr, t, 10)
     out[_O_DLO300] = (div(mid, lv) - 1.0) * 1e4
     out[_O_RET300] = (div(mid, _lag(hist, _H_MID, t, 300)) - 1.0) * 1e4
-    out[_O_SAME] = _same_size_val(ptr, price, vol, side, t)
+    out[_O_SAME] = _same_size_val(ptr, ptr_t0, price, vol, side, t)
     out[_O_SW3] = _roll_max(hist, _H_SW, t, 3)
     out[_O_DHI300] = (div(mid, hv) - 1.0) * 1e4
     micro = div(bb * aqr + ba * bqr, bqr + aqr)
@@ -526,7 +530,7 @@ def _run_v2(
     n = X.shape[0]
     out = np.empty((n, _N_OUT), dtype=np.float64)
     for i in range(n):
-        step_v2(X[i], ptr, price, vol, side, state, hist, out[i], bounds, ticks, top)
+        step_v2(X[i], ptr, 0, price, vol, side, state, hist, out[i], bounds, ticks, top)
     return out
 
 
@@ -596,48 +600,124 @@ def cross_section_ranks_v2(
     return rank.astype(float), dayret_rank.astype(float)
 
 
+@njit
+def _push_trades(
+    ptr: NDArray[np.int64],
+    pbuf: NDArray[np.float64],
+    vbuf: NDArray[np.float64],
+    sbuf: NDArray[np.float64],
+    t: int,
+    price: NDArray[np.float64],
+    vol: NDArray[np.float64],
+    side: NDArray[np.float64],
+) -> None:
+    """실시간 체결 버퍼를 최근 10초로 유지하고 초 ``t`` 의 체결을 붙인다.
+
+    호출 전: ``ptr[k]`` = 초 ``max(0, t-10)+k`` 의 시작(``ptr[0] = 0``), ``ptr[min(t, 10)]`` = 끝.
+    호출 뒤: 초 ``max(0, t-9)`` 부터 ``t`` 까지, ``ptr[min(t, 9)+1]`` = 끝.
+    용량은 호출부가 확인한다.
+    """
+    if t >= _SAME_WIN:
+        base = ptr[1]
+        end = ptr[_SAME_WIN]
+        for i in range(base, end):
+            pbuf[i - base] = pbuf[i]
+            vbuf[i - base] = vbuf[i]
+            sbuf[i - base] = sbuf[i]
+        for k in range(_SAME_WIN):
+            ptr[k] = ptr[k + 1] - base
+        m = _SAME_WIN - 1
+    else:
+        m = t
+    end = ptr[m]
+    for i in range(price.shape[0]):
+        pbuf[end + i] = price[i]
+        vbuf[end + i] = vol[i]
+        sbuf[end + i] = side[i]
+    ptr[m + 1] = end + price.shape[0]
+
+
 class SecondFeatureStreamV2:
     """실시간 누적 갱신 — 초가 닫힐 때 :meth:`update_array` 한 번. 배치와 같은 :func:`step_v2`.
 
     - 장중 체결·호가가 없는 초도 **빠짐없이** 넣는다(입력 nan, 체결 빈 배열). 창이 "초 개수"다.
     - 반환은 **매번 새 float64 배열**이다. 내부 버퍼를 돌려주면 모아 둔 행이 다음 호출에 조용히
       덮인다(v1 실데이터 대조에서 겪었다).
-    - 하루 한 인스턴스. 최근 10초 창 때문에 체결을 버퍼에 쌓는다(하루치, 필요할 때 두 배로 늘림).
+    - 메모리는 하루 내내 고정이다: 링버퍼(301초)와 **최근 10초** 체결만 든다(체결 버퍼는 256건에서
+      시작해 10초 창 최대 체결 수까지만 는다). 종목 수천 개를 한꺼번에 띄우는 소비자 기준으로
+      인스턴스당 수십 KB.
+    - 장중 재시작: 커널 상태는 그날 09:00 부터의 누적(누적대금·Kahan 합·300초 덱)이라 중간부터
+      시작하면 숫자가 달라진다. 그날 초 격자를 처음부터 다시 넣는다 — :meth:`from_history`.
     """
+
+    _INIT_TRADES = 256
 
     def __init__(self, *, tick_table: TickTable | None = None) -> None:
         tt = tick_table or stock_tick_table()
         self._bounds, self._ticks, self._top = tt.bounds, tt.ticks, tt.top
         self._state, self._hist = new_state_v2()
         self._out = np.empty(_N_OUT, dtype=np.float64)
-        self._ptr = np.zeros(1 << 15, dtype=np.int64)
-        cap = 1 << 16
-        self._price = np.empty(cap)
-        self._vol = np.empty(cap)
-        self._side = np.empty(cap)
+        self._ptr = np.zeros(_SAME_WIN + 1, dtype=np.int64)
+        self._price = np.empty(self._INIT_TRADES)
+        self._vol = np.empty(self._INIT_TRADES)
+        self._side = np.empty(self._INIT_TRADES)
+
+    @classmethod
+    def from_history(
+        cls,
+        inputs: ArrayLike,
+        trade_ptr: ArrayLike,
+        trade_price: ArrayLike,
+        trade_volume: ArrayLike,
+        trade_side: ArrayLike,
+        *,
+        tick_table: TickTable | None = None,
+    ) -> SecondFeatureStreamV2:
+        """장중 재시작 복구 — 그날 09:00 부터 지난 초들(:func:`compute_features_v2` 와 같은 입력)을
+        :meth:`update_array` 로 다시 넣은 스트림. 다음 호출은 초 ``len(inputs)`` 다."""
+        X = _f64(inputs)
+        if X.ndim != 2 or X.shape[1] != len(INPUT_COLUMNS_V2):
+            raise ValueError(f"inputs must be (n, {len(INPUT_COLUMNS_V2)})")
+        ptr = np.asarray(trade_ptr, dtype=np.int64)
+        if ptr.shape != (X.shape[0] + 1,):
+            raise ValueError("trade_ptr must have length n + 1")
+        price, vol, side = _f64(trade_price), _f64(trade_volume), _f64(trade_side)
+        s = cls(tick_table=tick_table)
+        for t in range(X.shape[0]):
+            a, b = int(ptr[t]), int(ptr[t + 1])
+            s._advance(X[t], price[a:b], vol[a:b], side[a:b])
+        return s
 
     @property
     def seconds(self) -> int:
         """지금까지 넣은 초 수(= 다음 초의 격자 인덱스)."""
         return int(self._state[_S_T])
 
-    def _append(self, price: NDArray[np.float64], vol: NDArray[np.float64],
-                side: NDArray[np.float64]) -> None:  # fmt: skip
+    @property
+    def nbytes(self) -> int:
+        """내부 배열이 차지하는 바이트(메모리 상한 점검용)."""
+        arrs = (self._state, self._hist, self._out, self._ptr, self._price, self._vol, self._side)
+        return sum(a.nbytes for a in arrs)
+
+    def _advance(
+        self, x: NDArray[np.float64], price: NDArray[np.float64], vol: NDArray[np.float64],
+        side: NDArray[np.float64],
+    ) -> None:  # fmt: skip
         t = self.seconds
-        if t + 2 > len(self._ptr):
-            self._ptr = np.concatenate([self._ptr, np.zeros(len(self._ptr), np.int64)])
-        p0 = int(self._ptr[t])
+        ptr = self._ptr
         k = len(price)
-        if p0 + k > len(self._price):
-            cap = max(2 * len(self._price), p0 + k)
+        need = int(ptr[min(t, _SAME_WIN)]) - (int(ptr[1]) if t >= _SAME_WIN else 0) + k
+        if need > len(self._price):
+            cap = max(2 * len(self._price), need)
+            used = int(ptr[min(t, _SAME_WIN)])
             for name in ("_price", "_vol", "_side"):
                 buf = np.empty(cap)
-                buf[:p0] = getattr(self, name)[:p0]
+                buf[:used] = getattr(self, name)[:used]
                 setattr(self, name, buf)
-        self._price[p0 : p0 + k] = price
-        self._vol[p0 : p0 + k] = vol
-        self._side[p0 : p0 + k] = side
-        self._ptr[t + 1] = p0 + k
+        _push_trades(ptr, self._price, self._vol, self._side, t, price, vol, side)
+        t0 = max(0, t - (_SAME_WIN - 1))
+        step_v2(x, ptr, t0, self._price, self._vol, self._side, self._state, self._hist,
+                self._out, self._bounds, self._ticks, self._top)  # fmt: skip
 
     def update_array(
         self,
@@ -654,9 +734,7 @@ class SecondFeatureStreamV2:
             raise ValueError(f"x must have length {len(INPUT_COLUMNS_V2)}")
         if not (len(pa) == len(va) == len(sa)):
             raise ValueError("price, volume, side must have the same length")
-        self._append(pa, va, sa)
-        step_v2(xa, self._ptr, self._price, self._vol, self._side, self._state, self._hist,
-                self._out, self._bounds, self._ticks, self._top)  # fmt: skip
+        self._advance(xa, pa, va, sa)
         r = self._out.copy()
         r[_LOG_IDX] = np.log1p(r[_LOG_IDX])
         return r

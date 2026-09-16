@@ -160,6 +160,88 @@ def test_stream_returns_fresh_array_each_update():
     assert np.array_equal(np.array(list(d.values())), ref[299], equal_nan=True)
 
 
+def test_stream_memory_is_bounded():
+    """종목 수천 개를 띄우므로 인스턴스 메모리가 하루 내내 작게 고정돼야 한다."""
+    ticks, quotes, _ = synthetic_market(3, codes=("000010",), n_ticks=20000, n_quotes=5000)
+    X, (ptr, price, vol, side) = aggregate_seconds_v2(ticks, quotes)
+    ref = compute_features_v2(X, ptr, price, vol, side)
+    s = SecondFeatureStreamV2()
+    sizes = []
+    for t in range(X.shape[0]):
+        a, b = ptr[t], ptr[t + 1]
+        r = s.update_array(X[t], price[a:b], vol[a:b], side[a:b])
+        if t % 997 == 0 or t == X.shape[0] - 1:
+            assert np.array_equal(r, ref[t], equal_nan=True), t
+        if t >= 600:
+            sizes.append(s.nbytes)
+    win10 = int((ptr[10:] - ptr[:-10]).max())  # 10초 창 최대 체결 수
+    assert len(price) > 20000 and win10 < 256
+    assert len(s._price) == 256 and len(s._ptr) == 11  # 늘지 않았다
+    assert max(sizes) == min(sizes) < 100_000
+
+
+def test_stream_buffer_grows_for_bursts_but_stays_windowed():
+    # 한 초에 1,000건 → 버퍼는 창 크기만큼만 는다. 값은 배치와 같다.
+    n = 40
+    X = np.full((n, len(INPUT_COLUMNS_V2)), np.nan)
+    X[:, 0], X[:, 1] = 1999.0, 2000.0
+    X[:, 7], X[:, 8] = 10.0, 20.0
+    counts = np.where(np.arange(n) % 7 == 3, 1000, 3)
+    ptr = np.concatenate([[0], np.cumsum(counts)])
+    rng = np.random.default_rng(0)
+    price = 1990.0 + rng.integers(0, 20, ptr[-1])
+    vol = rng.choice([10.0, 50.0, 7.0], ptr[-1])
+    side = rng.choice([-1.0, 0.0, 1.0], ptr[-1])
+    ref = compute_features_v2(X, ptr, price, vol, side)
+    s = SecondFeatureStreamV2()
+    rows = []
+    for t in range(n):
+        rows.append(s.update_array(X[t], price[ptr[t]:ptr[t + 1]], vol[ptr[t]:ptr[t + 1]],
+                                   side[ptr[t]:ptr[t + 1]]))  # fmt: skip
+    assert np.array_equal(np.stack(rows), ref, equal_nan=True)
+    assert len(s._price) <= 4096
+
+
+def test_from_history_resumes_bit_for_bit():
+    ticks, quotes, _ = synthetic_market(1, codes=("000010",), n_ticks=3000, n_quotes=3000)
+    X, (ptr, price, vol, side) = aggregate_seconds_v2(ticks, quotes)
+    ref = compute_features_v2(X, ptr, price, vol, side)
+    cut = 9137  # 장중 재시작 시각
+    s = SecondFeatureStreamV2.from_history(X[:cut], ptr[: cut + 1], price, vol, side)
+    assert s.seconds == cut
+    rows = [
+        s.update_array(X[t], price[ptr[t] : ptr[t + 1]], vol[ptr[t] : ptr[t + 1]],
+                       side[ptr[t] : ptr[t + 1]])
+        for t in range(cut, cut + 700)
+    ]  # fmt: skip
+    assert np.array_equal(np.stack(rows), ref[cut : cut + 700], equal_nan=True)
+
+
+def test_micro_dev_zero_depth_is_nan_like_original():
+    ticks, quotes, prevclose = synthetic_market(0, codes=("000010",), n_ticks=3000, n_quotes=3000)
+    qsec = (quotes.ts.dt.hour * 3600 + quotes.ts.dt.minute * 60 + quotes.ts.dt.second).to_numpy()
+    qsec = qsec - 9 * 3600
+    # 그 초에 스냅샷이 하나뿐인 행을 골라 1호가 잔량 양쪽을 0 으로
+    uniq, cnt = np.unique(qsec, return_counts=True)
+    target = int(uniq[(cnt == 1) & (uniq > 5000)][0])
+    k = int(np.nonzero(qsec == target)[0][0])
+    quotes = quotes.copy()
+    quotes.loc[quotes.index[k], ["bidqty1", "askqty1"]] = 0.0
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        ref = features_by_code(ticks, quotes, prevclose)["000010"]
+    X, tr = aggregate_seconds_v2(ticks, quotes)
+    assert X[target, 7] == 0.0 and X[target, 8] == 0.0
+    F = compute_features_v2(X, *tr)
+    j = STEP_COLUMNS_V2.index("micro_dev")
+    assert np.isnan(ref["micro_dev"][target]) and np.isnan(F[target, j])
+    assert np.array_equal(F[:, j], ref["micro_dev"], equal_nan=True)
+    s = SecondFeatureStreamV2.from_history(X[:target], tr[0][: target + 1], *tr[1:])
+    a, b = tr[0][target], tr[0][target + 1]
+    r = s.update_array(X[target], tr[1][a:b], tr[2][a:b], tr[3][a:b])
+    assert np.isnan(r[j])
+
+
 def test_input_validation():
     with pytest.raises(ValueError, match="inputs"):
         compute_features_v2(np.zeros((5, 3)), np.zeros(6, np.int64), np.zeros(0), np.zeros(0),

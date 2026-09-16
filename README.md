@@ -120,10 +120,29 @@ row = stream.update_array(x, price_s, volume_s, side_s)  # 매번 새 float64 �
 채우고, 원본 식은 `cross_section_ranks_v2(cumval, last, prevclose)` 에 옮겨 두었다. 원본 `cum_rank`
 대상은 "그날 틱 500건 이상" 종목이라 하루가 끝나야 정해진다는 점에 주의.
 
+실시간 초당 입력 만들기(배치 `aggregate_seconds_v2` 와 같은 규칙) — 초 `s` 가 닫힐 때:
+
+```python
+x = [
+    last_tick.best_bid, last_tick.best_ask,   # 그 초 마지막 틱 값, nan 이어도 그대로
+    last_tick.strength,                       # (그 초 틱이 없으면 셋 다 nan)
+    q.bidqty1, q.askqty1,                     # q = 그 초 마지막 "유효" 스냅샷(bid1>0 且 ask1>0), 없으면 nan
+    q.bidqty1 + q.bidqty2 + q.bidqty3,        #   ×q.bid1 (nan 잔량은 건너뛴 합) — bid_depth3
+    ...,                                      #   ask_depth3 도 같은 식
+    r.bidqty1, r.askqty1,                     # r = 그 초 마지막 스냅샷(유효 여부 무관), nan 이어도 그대로
+]
+# 유효 스냅샷이 있으면 bid/ask 는 그 스냅샷의 bid1/ask1 로 덮는다.
+row = stream.update_array(x, prices, volumes, sides)   # 그 초 체결들, (ts, seq) 순
+```
+
+스트림 메모리는 인스턴스당 수십 KB 로 고정이다(링버퍼 301초 + 최근 10초 체결). 커널 상태가
+09:00 부터의 누적이라 **장중 재시작**은 그날 초 격자를 처음부터 다시 넣어 복구한다:
+`SecondFeatureStreamV2.from_history(X, ptr, price, volume, side)`.
+
 **백테스트-운용 동일 커널.** v2 는 한 초를 전진하는 `step_v2` 하나를 배치 루프와 실시간 스트림이
 같이 부른다. 골든 테스트(합성 3 시드: 빈 호가창 초·체결 없는 초·폭주 체결·순위 동점)가 원본 대 배치,
 배치 대 실시간, numba 대 파이썬 폴백을 모두 `np.array_equal(equal_nan=True)` 와 자료형까지 대조한다.
-simnode 실측(워밍업 뒤, 부하 따라 흔들림): 스트림 한 초 갱신 6~14µs·배치 1~4µs/초(numba),
+simnode 실측(워밍업 뒤, 부하 따라 흔들림): 스트림 한 초 갱신 6~34µs·배치 1~4µs/초(numba),
 폴백은 각각 약 180µs·60µs.
 
 ### 지정가 대기열 모델 (`backtest.lob.queue`, v0.3)
