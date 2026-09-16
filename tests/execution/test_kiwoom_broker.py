@@ -5,13 +5,16 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from kiwoom_client.base import KiwoomAPIError
 
+import krx_quant_core.execution.kiwoom_broker as kb
 from krx_quant_core.execution.events import Holding, OpenOrder
-from krx_quant_core.execution.kiwoom_broker import KiwoomBroker
+from krx_quant_core.execution.kiwoom_broker import KiwoomBroker, _side_from_row
 from krx_quant_core.execution.orders import OrderIntent
 
 
@@ -336,3 +339,282 @@ def test_open_orders_skips_rows_without_ord_no():
     broker = KiwoomBroker(api, dry_run=False)
 
     assert broker.open_orders() == []
+
+
+def test_open_orders_skips_rows_with_empty_code():
+    row = {
+        "ord_no": "1", "stk_cd": "", "io_tp_nm": "매수",
+        "ord_qty": "1", "oso_qty": "1", "ord_pric": "1",
+    }
+    unfilled = _recorder([{"oso": [row]}])
+    api = _make_api(unfilled=unfilled)
+    broker = KiwoomBroker(api, dry_run=False)
+
+    assert broker.open_orders() == []
+
+
+def test_holdings_skips_zero_qty_rows():
+    row = {"stk_cd": "A005930", "rmnd_qty": "0", "pur_pric": "70000"}
+    balance = _recorder([{"acnt_evlt_remn_indv_tot": [row]}])
+    api = _make_api(balance=balance)
+    broker = KiwoomBroker(api, dry_run=False)
+
+    assert broker.holdings() == {}
+
+
+def test_holdings_avg_price_parses_decimal_and_comma():
+    row = {"stk_cd": "A005930", "rmnd_qty": "3", "pur_pric": "+70,250.5"}
+    balance = _recorder([{"acnt_evlt_remn_indv_tot": [row]}])
+    api = _make_api(balance=balance)
+    broker = KiwoomBroker(api, dry_run=False)
+
+    holding = broker.holdings()["005930"]
+    assert holding.avg_price == pytest.approx(70250.5)
+
+
+# ----- 리뷰 fix-1: 예외 → return_code 매핑 (KiwoomAPIError 덕타이핑) --------------
+
+
+def test_submit_kiwoom_api_error_maps_return_code_message_and_ord_no():
+    def raise_api_error(**kwargs):
+        raise KiwoomAPIError(
+            code=8,
+            message="주문가능금액 부족",
+            response={"ord_no": "999", "return_msg": "주문가능금액 부족"},
+        )
+
+    api = _make_api(buy=raise_api_error)
+    broker = KiwoomBroker(api, dry_run=False)
+
+    result = broker.submit(_buy_intent())
+
+    assert result.submitted is True
+    assert result.return_code == 8
+    assert result.return_msg == "주문가능금액 부족"
+    assert result.ord_no == "999"
+    assert result.ok is False
+
+
+def test_cancel_kiwoom_api_error_maps_return_code():
+    def raise_api_error(**kwargs):
+        raise KiwoomAPIError(code=3, message="인증 실패", response={"return_code": 3})
+
+    api = _make_api(cancel=raise_api_error)
+    broker = KiwoomBroker(api, dry_run=False)
+
+    result = broker.cancel("55", _sell_intent())
+
+    assert result.return_code == 3
+    assert result.return_msg == "인증 실패"
+    # response 에 ord_no 가 없으면 넘겨받은 ord_no 로 떨어진다.
+    assert result.ord_no == "55"
+
+
+def test_submit_plain_exception_without_code_falls_back_to_string():
+    def raise_plain(**kwargs):
+        raise ConnectionError("boom")
+
+    api = _make_api(buy=raise_plain)
+    broker = KiwoomBroker(api, dry_run=False)
+
+    result = broker.submit(_buy_intent())
+
+    assert result.return_code is None
+    assert result.return_msg == "ConnectionError: boom"
+    assert result.ord_no is None
+
+
+# ----- 리뷰 fix-2: 성공 응답이 예상 모양이 아닐 때 -------------------------------
+
+
+def test_submit_non_numeric_return_code_falls_back_without_raising():
+    buy = _recorder([{"return_code": "abc", "ord_no": "1", "return_msg": "이상함"}])
+    api = _make_api(buy=buy)
+    broker = KiwoomBroker(api, dry_run=False)
+
+    result = broker.submit(_buy_intent())
+
+    assert result.submitted is True
+    assert result.return_code is None
+    assert "abc" in result.return_msg
+
+
+def test_submit_non_dict_response_falls_back_without_raising():
+    buy = _recorder(["unexpected-string-response"])
+    api = _make_api(buy=buy)
+    broker = KiwoomBroker(api, dry_run=False)
+
+    result = broker.submit(_buy_intent())
+
+    assert result.submitted is True
+    assert result.return_code is None
+    assert result.ord_no is None
+
+
+def test_cancel_non_dict_response_falls_back_to_known_ord_no():
+    cancel = _recorder([None])
+    api = _make_api(cancel=cancel)
+    broker = KiwoomBroker(api, dry_run=False)
+
+    result = broker.cancel("42", _sell_intent())
+
+    assert result.submitted is True
+    assert result.return_code is None
+    assert result.ord_no == "42"
+
+
+# ----- 리뷰 fix-3: poll_fills 조회 바디 -----------------------------------------
+
+
+def test_poll_fills_calls_filled_orders_with_ka10076_body():
+    filled = _recorder([{"cntr": []}])
+    api = _make_api(filled=filled)
+    broker = KiwoomBroker(api, dry_run=False)
+
+    broker.poll_fills()
+
+    assert filled.calls == [
+        {"stk_cd": "", "qry_tp": "0", "sell_tp": "0", "ord_no": "", "stex_tp": "0"}
+    ]
+
+
+# ----- 리뷰 fix-4: 매수/매도 판별 — 추측 금지, 모르면 skip ------------------------
+
+
+def test_side_from_row_text_candidates():
+    assert _side_from_row({"io_tp_nm": "매도"}) == "sell"
+    assert _side_from_row({"io_tp_nm": "매수"}) == "buy"
+    assert _side_from_row({"sell_tp_nm": "매도정정"}) == "sell"
+
+
+def test_side_from_row_sell_tp_code_convention():
+    assert _side_from_row({"sell_tp": "1"}) == "sell"
+    assert _side_from_row({"sell_tp": "2"}) == "buy"
+
+
+def test_side_from_row_trde_tp_order_type_text_is_not_a_direction_signal():
+    # trde_tp 는 매매구분(방향)이 아니라 주문유형("보통" 등) 텍스트다 — 후보에서 뺐다.
+    assert _side_from_row({"trde_tp": "보통"}) is None
+
+
+def test_side_from_row_unknown_returns_none():
+    assert _side_from_row({}) is None
+    assert _side_from_row({"sell_tp": "9"}) is None
+
+
+def test_open_orders_skips_row_with_unknown_side_and_counts_it():
+    row = {"ord_no": "1", "stk_cd": "A005930", "ord_qty": "1", "oso_qty": "1", "ord_pric": "1"}
+    unfilled = _recorder([{"oso": [row]}])
+    api = _make_api(unfilled=unfilled)
+    broker = KiwoomBroker(api, dry_run=False)
+
+    assert broker.skipped_rows == 0
+    assert broker.open_orders() == []
+    assert broker.skipped_rows == 1
+
+
+def test_poll_fills_sell_row_via_io_tp_nm():
+    row = {
+        "ord_no": "1", "stk_cd": "A005930", "io_tp_nm": "매도",
+        "cntr_qty": "5", "cntr_pric": "70000",
+    }
+    filled = _recorder([{"cntr": [row]}])
+    api = _make_api(filled=filled)
+    broker = KiwoomBroker(api, dry_run=False)
+
+    fills = broker.poll_fills()
+
+    assert len(fills) == 1
+    assert fills[0].side == "sell"
+
+
+def test_poll_fills_skips_unknown_side_row_and_counts_it():
+    row = {"ord_no": "1", "stk_cd": "A005930", "cntr_qty": "5", "cntr_pric": "70000"}
+    filled = _recorder([{"cntr": [row]}])
+    api = _make_api(filled=filled)
+    broker = KiwoomBroker(api, dry_run=False)
+
+    fills = broker.poll_fills()
+
+    assert fills == []
+    assert broker.skipped_rows == 1
+
+
+# ----- 리뷰 fix-5: poll_fills 증분 상태 관리 -------------------------------------
+
+
+def test_prime_records_baseline_without_emitting_fills():
+    row = {
+        "ord_no": "1", "stk_cd": "A005930", "io_tp_nm": "매수",
+        "cntr_qty": "10", "cntr_pric": "70000",
+    }
+    filled = _recorder([{"cntr": [row]}, {"cntr": [row]}])
+    api = _make_api(filled=filled)
+    broker = KiwoomBroker(api, dry_run=False)
+
+    broker.prime()
+    fills = broker.poll_fills()
+
+    assert fills == []  # prime 이 기준선을 이미 10으로 잡아서 증분 0
+
+
+def test_poll_fills_sums_multiple_rows_same_order_in_one_response():
+    rows = [
+        {
+            "ord_no": "1", "stk_cd": "A005930", "io_tp_nm": "매수",
+            "cntr_qty": "3", "cntr_pric": "70000",
+        },
+        {
+            "ord_no": "1", "stk_cd": "A005930", "io_tp_nm": "매수",
+            "cntr_qty": "4", "cntr_pric": "70050",
+        },
+    ]
+    filled = _recorder([{"cntr": rows}])
+    api = _make_api(filled=filled)
+    broker = KiwoomBroker(api, dry_run=False)
+
+    fills = broker.poll_fills()
+
+    assert len(fills) == 1
+    assert fills[0].qty == 7
+    assert fills[0].price == 70050  # 마지막 행 값(근사) — docstring 참고
+
+
+def test_poll_fills_normalizes_leading_zero_ord_no_across_calls():
+    row1 = {
+        "ord_no": "0000001", "stk_cd": "A005930", "io_tp_nm": "매수",
+        "cntr_qty": "4", "cntr_pric": "70000",
+    }
+    row2 = {
+        "ord_no": "1", "stk_cd": "A005930", "io_tp_nm": "매수",
+        "cntr_qty": "10", "cntr_pric": "70100",
+    }
+    filled = _recorder([{"cntr": [row1]}, {"cntr": [row2]}])
+    api = _make_api(filled=filled)
+    broker = KiwoomBroker(api, dry_run=False)
+
+    first = broker.poll_fills()
+    second = broker.poll_fills()
+
+    assert first[0].qty == 4
+    assert first[0].ord_no == "0000001"  # 호출부에 돌려주는 값은 원본 그대로
+    assert second[0].qty == 6  # 10 - 4 만 신규 — 선행 0 정규화로 같은 주문으로 인식
+
+
+def test_poll_fills_resets_cumulative_on_new_kst_day(monkeypatch):
+    dates = iter([datetime(2026, 9, 16, 15, 20), datetime(2026, 9, 17, 9, 0)])
+    monkeypatch.setattr(kb, "now_kst", lambda: next(dates))
+
+    row = {
+        "ord_no": "1", "stk_cd": "A005930", "io_tp_nm": "매수",
+        "cntr_qty": "10", "cntr_pric": "70000",
+    }
+    filled = _recorder([{"cntr": [row]}, {"cntr": [row]}])
+    api = _make_api(filled=filled)
+    broker = KiwoomBroker(api, dry_run=False)
+
+    first = broker.poll_fills()
+    second = broker.poll_fills()
+
+    assert first[0].qty == 10
+    assert second[0].qty == 10  # 날짜가 바뀌어 누적이 초기화됨 — 같은 10이 다시 신규로 잡힌다
