@@ -62,7 +62,11 @@ def optuna_search(
         if not config_keys:
             config_keys.extend(cfg.keys())
         record_trial(label, cfg, logs_dir=logs_dir)
-        metrics = objective(cfg)
+        try:
+            metrics = objective(cfg)
+        except Exception as exc:  # noqa: BLE001 — 한 config 가 죽어도 study 는 계속 돈다
+            rows.append({**cfg, "error": repr(exc)})
+            return float("nan")  # optuna 가 이 trial 을 FAIL 로 표시하고 다음으로 넘어간다
         rows.append({**cfg, **metrics})
         return metrics[metric]
 

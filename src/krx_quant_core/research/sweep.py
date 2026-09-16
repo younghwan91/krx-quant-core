@@ -94,12 +94,24 @@ def _run_one(
 
 @dataclass
 class SweepResult:
-    """스윕 결과 — config 열 + 지표 열을 가진 ``frame``, 원장에 쌓인 distinct config 수."""
+    """스윕 결과 — config 열 + 지표 열을 가진 ``frame``, 원장에 쌓인 distinct config 수.
+
+    ``n_trials`` = 서로 다른 개별 config 수 **+ 1**. ``start_run`` 이 스윕을 감쌀 때 자기
+    자신의 요약 config(``{"sweep_n":..., "configs_fp":..., "seed":...}``)를 같은 label 의
+    원장에 한 행으로 적기 때문이다(``runs.py`` 는 항상 그렇게 동작 — 바꾸지 않았다). 같은
+    스윕(같은 configs·seed)을 다시 돌리면 그 요약 행은 지문이 같아 중복 집계되지 않는다.
+    DSR 관점에서는 "이 config 조합을 시도해보기로 한 결정" 자체도 한 번의 시행으로 세는
+    셈이라 보수적이다(N 을 부풀리는 쪽) — 깎는 쪽보다 안전하다.
+    """
 
     frame: pd.DataFrame
     n_trials: int
     label: str
     config_keys: tuple[str, ...] = ()
+    """``best()`` 가 행에서 ``"config"`` 서브딕트를 재구성할 때 쓰는 키 목록. 스윕의 첫
+    config(``configs[0]``)의 키를 그대로 쓴다 — 모든 config 가 같은 키 집합이라는 가정이다
+    (:func:`grid` 나 통상적 ``optuna`` ``space()`` 는 이 가정을 지킨다). config 마다 키가
+    다른 이형(heterogeneous) 스윕을 직접 만드는 소비자는 이 가정이 깨질 수 있다."""
 
     def best(
         self, metric: str, *, returns_key: str | None = None, maximize: bool = True
@@ -142,6 +154,12 @@ def run_sweep(
     ``trials_dir`` 는 :func:`~.runs.start_run` 이 쓰는 것과 **같은 경로 계산**을 쓴다
     (:func:`~.gitstate.resolve_trials_dir`) — 아니면 개별 config 원장 기록이 ``start_run``
     이 세는 폴더와 어긋나 ``count_trials`` 가 스윕 config 를 놓친다.
+
+    반환된 ``SweepResult.n_trials`` = ``len(configs)`` 의 distinct 개수 **+ 1** —
+    ``start_run`` 자신이 스윕 요약 config 를 같은 label 원장에 한 행 적기 때문이다
+    (자세한 설명은 :class:`SweepResult` 참고). ``SweepResult.config_keys`` 는
+    ``configs[0]`` 의 키를 그대로 쓰므로, ``best()`` 가 재구성하는 ``"config"`` 는
+    모든 config 가 같은 키 집합이라는 가정 위에 있다.
     """
     repo_root = Path(repo_root)
     configs = list(configs)

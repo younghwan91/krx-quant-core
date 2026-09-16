@@ -157,3 +157,37 @@ def test_optuna_search_skips_without_optuna(repo):
     assert len(result.frame) == 5
     best = result.best("score")
     assert 0.1 <= best["config"]["thr"] <= 0.9
+
+
+def test_optuna_search_isolates_objective_exceptions(repo):
+    pytest.importorskip("optuna")
+    from krx_quant_core.research.optuna import optuna_search
+
+    def space(trial):
+        return {"thr": trial.suggest_float("thr", 0.1, 0.9)}
+
+    def flaky_objective(cfg):
+        if cfg["thr"] > 0.5:
+            raise ValueError("boom")
+        return {"score": cfg["thr"]}
+
+    # 일부 config 가 objective 에서 죽어도 study 전체가 죽지 않고 SweepResult 가 나와야 한다.
+    result = optuna_search(
+        flaky_objective,
+        space,
+        label="opt-err",
+        repo_root=repo,
+        data=DATA,
+        n_trials=10,
+        seed=0,
+    )
+    assert len(result.frame) == 10
+    assert "error" in result.frame.columns
+    error_rows = result.frame[result.frame["error"].notna()]
+    ok_rows = result.frame[result.frame["error"].isna()]
+    assert not error_rows.empty  # 시드 0·범위 [0.1, 0.9] 에서 최소 하나는 thr > 0.5
+    assert (error_rows["thr"] > 0.5).all()
+    assert not ok_rows.empty
+    assert (ok_rows["thr"] <= 0.5).all()
+    best = result.best("score")
+    assert best["config"]["thr"] <= 0.5
