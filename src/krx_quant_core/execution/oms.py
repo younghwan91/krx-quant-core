@@ -165,6 +165,8 @@ class OrderManager:
         #: 반영하지 않았다 — :meth:`reconcile` 결과와 함께 호출부·사람이 확인한다.
         self.unmatched_fills: list[Fill] = []
         #: 종목별로 "포지션이 열린 뒤 지금까지" 분할 청산 실현손익 합. 완전 청산 때 리셋.
+        #: 날짜로는 리셋하지 않는다 — 장중 데몬은 매일 청산하고 끝난다는 전제(오버나잇
+        #: 분할 청산이면 전날 조각이 다음 날 승패 판정에 섞인다).
         self._open_realized: dict[str, float] = {}
 
     @property
@@ -223,11 +225,24 @@ class OrderManager:
         else:
             broker_pos = self.broker.holdings().get(code)
             held = broker_pos.qty if broker_pos is not None else 0
-        pending = sum(
-            o.remaining
-            for o in self.broker.open_orders()
-            if o.code == code and o.side == "sell"
-        )
+        try:
+            pending = sum(
+                o.remaining
+                for o in self.broker.open_orders()
+                if o.code == code and o.side == "sell"
+            )
+        except Exception as e:
+            # 미체결 조회가 실패했다고 청산을 막으면 포지션이 무감시로 남는다. 예약 없이
+            # 내보낸다 — 실제 초과 매도는 브로커(증권사)가 보유 부족으로 거부한다.
+            pending = 0
+            self._log_row(
+                {
+                    "ts": self._clock().isoformat(sep=" ", timespec="seconds"),
+                    "event": "open_orders_failed",
+                    "code": code,
+                    "error": f"{type(e).__name__}: {e}",
+                }
+            )
         available = held - pending
         if qty > available:
             return self._finish(
@@ -328,9 +343,11 @@ class OrderManager:
 
     def _errored(self, intent: OrderIntent, exc: Exception) -> OrderResult:
         # submitted=True: 요청이 브로커에 닿았는지 모른다 — 안 나갔다고 가정하지 않는다.
+        # dry_run=False: 예외는 "아무것도 확인되지 않았다"는 뜻이다. dry-run 브로커라도
+        # dry_run=True 로 두면 OrderResult.ok 가 True 가 되어 실패가 통과로 읽힌다.
         return OrderResult(
             intent=intent,
-            dry_run=self._dry_run,
+            dry_run=False,
             submitted=True,
             return_code=None,
             return_msg=f"{type(exc).__name__}: {exc}",

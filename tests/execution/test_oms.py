@@ -435,3 +435,40 @@ def test_oms_blocked_result_uses_broker_dry_run_attr():
     assert om.buy(CODE, 1, 10_000, ref_price=10_000).result.dry_run is True
     assert om.sell(CODE, 1, 10_000).result.dry_run is True
     assert _oms(kill=kill)[0].buy(CODE, 1, 10_000, ref_price=10_000).result.dry_run is False
+
+
+# ------------------------------------------------------------------ review round 2
+
+
+class _OpenOrdersFailBroker(PaperBroker):
+    def open_orders(self):
+        raise ConnectionError("down")
+
+
+def test_sell_survives_open_orders_failure(tmp_path):
+    log = tmp_path / "orders.jsonl"
+    broker = _OpenOrdersFailBroker(holdings={CODE: Holding(CODE, 5, 10_000.0)})
+    om, _, _, _, _ = _oms(broker=broker, order_log=log)
+    mr = om.sell(CODE, 5, 10_000)
+    assert mr.status is OrderStatus.SUBMITTED
+    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    failed = [r for r in rows if r.get("event") == "open_orders_failed"]
+    assert len(failed) == 1
+    assert failed[0]["code"] == CODE and failed[0]["error"] == "ConnectionError: down"
+    assert rows[-1]["status"] == "submitted"
+
+
+class _DryRaisingBroker(_RaisingBroker):
+    dry_run = True
+
+
+def test_exception_result_not_ok_even_for_dry_run_broker():
+    broker = _DryRaisingBroker(holdings={CODE: Holding(CODE, 5, 10_000.0)})
+    om, _, _, _, _ = _oms(broker=broker)
+    for mr in (
+        om.buy(CODE, 1, 10_000, ref_price=10_000),
+        om.sell(CODE, 1, 10_000),
+        om.cancel("P1", OrderIntent(side="buy", code=CODE, qty=1, price=10_000)),
+    ):
+        assert mr.status is OrderStatus.REJECTED
+        assert mr.result.dry_run is False and mr.result.ok is False
