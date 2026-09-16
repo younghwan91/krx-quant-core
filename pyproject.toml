@@ -1,6 +1,6 @@
 [project]
 name = "krx-quant-core"
-version = "0.5.0"
+version = "0.5.1"
 description = "한국 주식(KOSPI·KOSDAQ) 퀀트 공통 코어 — 호가단위·가격제한폭·세션, 일자별 거래세 비용모델, 주문 가드, 공시 리스크 분류, 체결 시뮬레이션, Deflated Sharpe·purged CV 검증 통계"
 readme = "README.md"
 license = { text = "Apache-2.0" }
