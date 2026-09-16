@@ -28,6 +28,8 @@ dev = ["pytest>=8.0", "ruff==0.16.2"]
 fast = ["numba>=0.60"]
 # 실행 기록 Postgres 색인(runtime.runindex). 없으면 JSONL 만 쓴다.
 db = ["psycopg[binary]>=3.1"]
+# research.optuna_search — TPE 파라미터 탐색. 없으면 research.sweep(grid)만 쓴다.
+opt = ["optuna>=4.0"]
 
 [project.scripts]
 kqc = "krx_quant_core.runtime.cli:main"

@@ -11,7 +11,14 @@ import re
 import subprocess
 from pathlib import Path
 
-__all__ = ["git_dirty", "git_head", "label_dir", "runs_root", "validate_label"]
+__all__ = [
+    "git_dirty",
+    "git_head",
+    "label_dir",
+    "resolve_trials_dir",
+    "runs_root",
+    "validate_label",
+]
 
 _LABEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
@@ -59,3 +66,18 @@ def runs_root(repo_root: Path | str) -> Path:
 
 def label_dir(repo_root: Path | str, label: str) -> Path:
     return runs_root(repo_root) / validate_label(label)
+
+
+def resolve_trials_dir(repo_root: Path | str, trials_dir: Path | str | None) -> Path:
+    """시행 원장 폴더 경로 — :func:`~.runs.start_run` 이 쓰는 계산을 그대로 재사용한다.
+
+    ``run_sweep``·``optuna_search`` 도 개별 config 를 같은 폴더의 ``TRIALS.jsonl`` 에
+    적어야 ``count_trials`` 가 스윕 config 를 본다. 계산이 두 군데서 갈라지면 N 이
+    조용히 틀어진다 — 그래서 한 곳에만 둔다.
+    """
+    if trials_dir is None:
+        return runs_root(repo_root)
+    d = Path(trials_dir)
+    if not d.is_absolute():
+        d = Path(repo_root) / d
+    return d

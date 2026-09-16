@@ -39,7 +39,7 @@ from krx_quant_core.market.session import now_kst
 from krx_quant_core.stats.trials import config_fingerprint, count_trials, record_trial
 
 from . import oos, runindex
-from .gitstate import git_dirty, git_head, label_dir, runs_root
+from .gitstate import git_dirty, git_head, label_dir, resolve_trials_dir
 from .host import require_backtest_host
 from .oos import RunRefused
 
@@ -127,12 +127,7 @@ def start_run(
     if data is not None:
         oos.check(label, data.start, data.end, repo_root=repo_root, final=final, run_id=run_id)
 
-    if trials_dir is None:
-        logs_dir = runs_root(repo_root)
-    else:
-        logs_dir = Path(trials_dir)
-        if not logs_dir.is_absolute():
-            logs_dir = repo_root / logs_dir
+    logs_dir = resolve_trials_dir(repo_root, trials_dir)
     record_trial(label, config, logs_dir=logs_dir)
     run = Run(label=label, run_id=run_id, dir=d, n_trials=count_trials(label, logs_dir=logs_dir))
     path = d / "RUNS.jsonl"
