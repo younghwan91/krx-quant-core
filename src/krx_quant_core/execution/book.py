@@ -51,7 +51,10 @@ def _zero_slippage_cost_model() -> KoreanCostModel:
 
 
 class PositionBook:
-    """체결로 갱신되는 포지션 장부. 매수는 평단 가중평균, 매도는 비용 차감 실현손익."""
+    """체결로 갱신되는 포지션 장부. 매수는 평단 가중평균, 매도는 비용 차감 실현손익.
+
+    ``n_round_trips`` 는 청산 체결(매도 fill) 수다 — 완전 청산된 포지션 수가 아니다.
+    """
 
     def __init__(
         self,
@@ -66,6 +69,8 @@ class PositionBook:
         self._positions: dict[str, _Position] = {}
         self._trades: list[dict[str, Any]] = []
         self.realized_krw: float = 0.0
+        #: 청산 체결(매도 fill) 수 — 분할 청산은 여러 번 센다. "포지션이 완전히 0 으로
+        #: 닫힌 횟수"가 아니다(부분 매도 두 번 = 2, 완전 청산 한 번이 아니라).
         self.n_round_trips: int = 0
 
     def apply(self, fill: Fill) -> float:
@@ -112,10 +117,17 @@ class PositionBook:
         qty = Decimal(fill.qty)
         sell_price = Decimal(fill.price)
 
-        buy_cost = self._cost_model.cost_of_trade(avg, qty, "BUY", market, trade_date)
+        # 매수측 수수료는 cost_of_trade 를 거치지 않는다 — 그 경로는 apply_slippage 가
+        # (슬리피지 0 이어도) round_to_tick 을 거쳐 가격을 호가단위로 스냅한다. 평단은
+        # 가중평균이라 호가단위에 있으리라는 보장이 없고, 스냅되면 매수 대금(notional)이
+        # 조용히 바뀌어 수수료가 달라진다. 매수는 실제로 낸 적 없는 가상의 청산이니
+        # commission() 을 평단 그대로의 notional 에 직접 적용한다.
+        buy_cost = self._cost_model.commission(avg * qty)
+        # 매도측은 실제 체결가(항상 유효 호가)라 cost_of_trade 로 슬리피지 경로를 타도
+        # 스냅으로 값이 바뀌지 않는다 — 세금까지 같이 나오는 이 경로를 그대로 쓴다.
         sell_cost = self._cost_model.cost_of_trade(sell_price, qty, "SELL", market, trade_date)
         gross = (sell_price - avg) * qty
-        pnl = gross - buy_cost.commission - sell_cost.commission - sell_cost.tax
+        pnl = gross - buy_cost - sell_cost.commission - sell_cost.tax
         pnl_f = float(pnl)
 
         self._trades.append(
@@ -169,6 +181,7 @@ class PositionBook:
             "ts": fill.ts.isoformat(),
         }
         assert self._journal_path is not None
+        self._journal_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._journal_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
             f.flush()
