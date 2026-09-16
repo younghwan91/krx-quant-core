@@ -3,6 +3,11 @@
 엔진(이벤트 루프)은 여기 없다. 루프는 소비자마다 다르지만(틱 스캘핑·일봉 데이트레이딩·
 월간 리밸런스), 그 루프가 부르는 "체결됐나/얼마에/순손익이 얼마고 성과가 어떤가" 는
 세 레포가 같은 답을 내야 한다.
+
+``run_replay``(:mod:`.replay`)는 여기서 다시 내보내지 않는다 — ``execution.paper`` 가
+``backtest.fills`` 를 쓰고 ``backtest.replay`` 는 ``execution.engine`` 을 쓰는 양방향
+의존이라, 이 파일 맨 위에서 ``.replay`` 를 임포트하면 순환 임포트가 난다(직접 확인함).
+``from krx_quant_core.backtest.replay import run_replay`` 로 따로 임포트한다.
 """
 
 from .crosssectional import rank_ic, rank_tilt_backtest, staggered_tranche_backtest

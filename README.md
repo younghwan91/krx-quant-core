@@ -28,9 +28,12 @@ Deflated Sharpe·purged CV 검증 통계를 한 패키지로 묶었다.
 ## 설치
 
 ```bash
-pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.4.0"
-# 초 격자 호가 리플레이(backtest.lob)를 numba 로 가속하려면 extra 로: "krx-quant-core[fast] @ git+...@v0.4.0"
-# PyPI 릴리스 전까지는 git 태그로 고정한다.
+pip install krx-quant-core==0.5.0
+# 초 격자 호가 리플레이(backtest.lob)를 numba 로 가속하려면 extra 로: "krx-quant-core[fast]==0.5.0"
+# optuna 스윕(research.optuna_search)까지 쓰려면: "krx-quant-core[fast,opt]==0.5.0"
+
+# PyPI 릴리스 전(또는 태그 고정 개발 중)에는 git 태그로:
+pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.5.0"
 ```
 
 Python ≥ 3.11. 의존성은 `kiwoom-client`(호가단위 표의 정본), `numpy`, `pandas` 뿐이다.
@@ -42,12 +45,17 @@ Python ≥ 3.11. 의존성은 `kiwoom-client`(호가단위 표의 정본), `nump
 krx_quant_core/
 ├── market/     종목코드·Market, 호가단위, 상/하한가, KST 세션, 거래일 달력
 ├── costs/      일자별 거래세 스케줄, KoreanCostModel(Decimal), round_trip_cost(float)
-├── execution/  키움 REST 주문 스펙, OrderIntent/OrderResult, OrderGuard(순수 가드)
+├── execution/  주문 관리 계층 — OrderManager·InstanceLock(oms.py), PositionBook(book.py),
+│               Broker 프로토콜·PaperBroker·KiwoomBroker, EngineCore(같은 전략, 실매매/리플레이),
+│               키움 REST 주문 스펙, OrderIntent/OrderResult, OrderGuard(순수 가드)
 ├── risk/       DART 중대공시 분류·RiskGate, DartDisclosureDB, KillSwitch
-├── backtest/   호가 스윕 VWAP·왕복비용, 지정가 체결 규칙, 트레이드 원장 지표, 횡단면 시뮬
+├── backtest/   호가 스윕 VWAP·왕복비용, 지정가 체결 규칙, 트레이드 원장 지표, 횡단면 시뮬,
+│               replay.py(run_replay — EngineCore+PaperBroker 로 과거 이벤트 리플레이)
 │   └── lob/    틱·호가 → 초 격자 특징·경로, 배치=실시간 공용 커널, 에피소드 시뮬, 무작위 대조군, 지정가 대기열 모델
+├── research/   run_sweep(격자·병렬·캐시), optuna_search(TPE, extra `opt`) — 둘 다 모든
+│               config 를 시행 원장에 적는다
 ├── stats/      Deflated/Probabilistic Sharpe, t-haircut, purged walk-forward, 부트스트랩, 취약성
-└── runtime/    호스트 가드, 실행 기록 start_run, OOS 하드 잠금, kqc CLI(simnode 원격 실행)
+└── runtime/    호스트 가드, 실행 기록 start_run, OOS 하드 잠금, kqc CLI(simnode 원격 실행 · kqc nightly)
 ```
 
 ```python
@@ -134,6 +142,126 @@ kqc run scalp-it -- uv run python scripts/x.py   # trader 에서: 푸시된 sha 
 kqc runs ls scalp84-flow --repo-root ~/git/scalp-it
 ```
 
+## 공용 엔진 (v0.5)
+
+daytrade-it·scalp-it 감사 결과(2026-09-16) 둘 다 코어를 25~40%만 쓰고 있었다 — 가드·킬스위치는
+있는데 체결·주문관리는 각자 복제, 페이퍼 모드는 데몬이 안 씀, 재시작 대사가 없었다. v0.5 는
+그 위에 얹는 세 겹이다: **주문 관리 계층**(`execution`), **같은 전략이 실매매/리플레이를 도는 엔진**
+(`execution.engine` + `backtest.replay`), **simnode 스윕·야간 실행**(`research` + `runtime.nightly`).
+
+| 배워온 곳 | 원리 | 적용 |
+|---|---|---|
+| NautilusTrader | 전략 코드는 백테스트·실매매에서 **같다** — 다른 건 브로커/데이터 어댑터뿐. 시작 시 실계좌 대사 | `EngineCore`+`Strategy` 프로토콜, `OrderManager.reconcile()` |
+| QuantConnect Lean | 브로커 모델·체결 모델·수수료 모델을 분리 | `Broker` 프로토콜 / `PaperBroker(fill_basis=...)` / 기존 `costs` |
+| hftbacktest (MIT) | L2 호가 대기열 위치 모델 | `PaperBroker` 는 초 단위 스냅샷엔 `backtest.fills`, 격자 연구엔 `backtest.lob.queue` |
+| vectorbt / Optuna | 대량 파라미터 스윕·병렬·조기 가지치기 | `research.run_sweep`(프로세스 풀·캐시), `research.optuna_search`(extra `opt`) |
+| MLflow | 실행마다 코드·데이터·파라미터·지표를 기록 | 기존 `runtime.start_run` + `TRIALS.jsonl` 재사용 — 스윕의 모든 config 가 DSR 의 N 에 들어간다 |
+
+### 1. 같은 전략, 실매매와 리플레이
+
+`Strategy`(`on_start`/`on_event`/`on_end`)는 `StrategyContext.oms`(`OrderManager`)만 보고 어디서
+체결되는지 모른다. 브로커만 바뀐다 — 웹소켓 이벤트는 `KiwoomBroker` 위 `EngineCore` 로, 과거
+이벤트는 `PaperBroker` 위로 흘린다(`backtest.replay.run_replay` 가 그 배선을 대신 해 준다).
+
+```python
+from krx_quant_core.execution import (
+    EngineCore, KiwoomBroker, OrderGuard, OrderGuardConfig, OrderManager, PositionBook, Quote,
+)
+
+class MyStrategy:
+    def on_event(self, ev, ctx) -> None:
+        if isinstance(ev, Quote) and ctx.oms.book.position(ev.code) is None:
+            ctx.oms.buy(ev.code, 1, int(ev.ask), ref_price=ev.ask)
+
+# 리플레이 — run_replay 는 backtest 최상위가 아니라 backtest.replay 에서 임포트한다
+# (execution.paper ↔ backtest.replay 상호 의존이라 backtest/__init__ 이 이걸 다시 내보내면 순환 임포트가 난다).
+from krx_quant_core.backtest.replay import merge_events, run_replay
+
+events = merge_events(bars=daily_bars_df)   # ts, code, open/high/low/close, volume
+result = run_replay(MyStrategy(), events)
+result.fills, result.trades, result.book.realized_krw   # trades = 청산 원장(매도 fill 당 한 행)
+
+# 실매매 — 같은 전략, KiwoomBroker 위
+broker = KiwoomBroker(api, dry_run=True)   # dry_run=False 는 실주문
+# fills_verified=False(기본): ka10076 체결 조회가 미검증이라 poll_fills/prime 은 [] (경고 1회).
+# 모의계좌 실호출로 필드를 확인한 뒤에만 KiwoomBroker(api, dry_run=False, fills_verified=True).
+guard = OrderGuard(OrderGuardConfig(max_qty=10, price_band_pct=0.05))
+oms = OrderManager(broker, guard=guard, book=PositionBook(journal=Path("data/positions/2026-09-17.jsonl")),
+                   order_log=Path("logs/orders.jsonl"))
+engine = EngineCore(MyStrategy(), oms)
+engine.feed(Quote(now_kst(), "005930", 70_000, 70_100))   # 웹소켓 시세 이벤트마다 호출
+# 체결 동기화는 타이머로 — fills_verified=True 면 feed 마다 조회 REST 가 나가 한도를 넘는다.
+#   loop.call_later / 스레드 타이머 등으로 2초마다: oms.sync()
+```
+
+> 이름 주의: `execution.Trade` 는 시세 체결 틱 이벤트, `backtest.Trade` 는 청산 원장 한 행이다.
+> 한 파일에서 둘 다 쓰면 `from krx_quant_core.execution import Trade as TradeTick` 처럼 별칭을 쓸 것.
+
+### 2. simnode 파라미터 스윕
+
+```python
+from krx_quant_core.research import grid, run_sweep
+from krx_quant_core.runtime import DataSpec
+
+def objective(cfg: dict) -> dict:
+    ...  # 모듈 최상위 함수 — ProcessPoolExecutor 로 자식 프로세스에 피클된다
+    return {"sharpe": ..., "mean_bp": ...}
+
+configs = grid(threshold=[0.5, 0.6, 0.7], hold_sec=[60, 120])
+res = run_sweep(objective, configs, label="scalp84-sweep", repo_root=ROOT,
+                data=DataSpec("2026-08-24", "2026-09-07", "train"))
+res.frame, res.n_trials, res.best("sharpe")   # 모든 config 가 TRIALS.jsonl 에 적힌다
+```
+
+### 3. `kqc nightly` — simnode 야간 실행
+
+레포에 `research/nightly.toml` 을 두면 `kqc nightly` 가 순서대로(job 하나가 실패해도 다음은 돈다)
+`nice -n 10` 으로 실행하고, 로그와 요약(`name, rc, secs, timed_out`)을 `~/.kqc/nightly/<날짜>/` 에 남긴다.
+
+```toml
+# research/nightly.toml
+[[job]]
+name = "pair-sweep"
+cmd = ["uv", "run", "python", "scripts/pair_sweep.py", "--days", "20"]
+timeout_min = 60
+weekdays_only = true
+```
+
+```bash
+kqc nightly ~/git/scalp-it                       # 크론 한 줄(장 마감 후, simnode 전용)
+kqc nightly ~/git/scalp-it --only pair-sweep --dry-run
+```
+
+### 안전 규칙 — 지키는 것과 아직 못 미더운 것
+
+- **매수는 킬·가드가 막지만 매도(청산)는 막지 않는다.** `OrderManager.sell` 이 막는 건 1주 미만·
+  가용 보유(보유 − 걸린 매도 잔량)보다 많이 파는 것·0 이하 지정가, 셋뿐이다. 킬이 걸린 날일수록
+  들고 있는 포지션은 빠져나가야 한다 — 청산까지 막으면 실포지션이 감시 없이 남는다.
+- **주문 제출은 재시도하지 않는다.** 타임아웃·예외·`return_code` 없는 응답은 `OrderStatus.UNKNOWN`
+  (`"unknown"`) — **나갔는지 모른다, 재시도 금지.** 미체결·잔고로 확인한다. 매수 UNKNOWN 은 일일
+  횟수 한도에 센다(나간 주문을 안 세면 상한을 넘긴다). 브로커가 rc≠0 으로 거부한 것만 `rejected`.
+  조회(미체결·잔고·체결)만 예외 시 1회 재시도한다.
+- **`poll_fills`(`ka10076` 체결 조회)는 미검증이다.** 필드명이 kiwoom-client 에 예시가 없어
+  브리프 추정값을 쓴다. 그래서 `KiwoomBroker(fills_verified=False)` 가 기본이고, 이때 `poll_fills`·
+  `prime` 은 조회 없이 `[]` 다 — **모의계좌로 실호출 확인 전에는 켜지 말 것.** `OrderManager.sync`
+  는 조회 예외를 `poll_fills_failed` 로그로 남기고 `[]` 를 돌려준다(엔진이 매 이벤트 터지지 않게).
+- **`holdings()`(`kt00018`)·`open_orders()`(`ka10075`)도 전부 검증된 건 아니다.** 특히 `ka10075`
+  의 매수/매도 판별 필드(`io_tp_nm`·`sell_tp_nm`·`sell_tp`)는 실호출 미확인이다. 판별 못 한 행은
+  버리고(`skipped_rows`), 행이 있는데 전부 버려지면 경고 로그를 남긴다 — 조용히 빈 목록이면 매도
+  잔량 예약이 0 이 되어 중복 청산이 나간다.
+- **공유 계좌: 내 주문의 체결만 반영한다.** scalp-it·daytrade-it 이 같은 계좌를 쓰므로 체결 조회에
+  남의 체결이 섞인다. `OrderManager` 는 자기가 낸 주문번호(`own_orders`, `normalize_ord_no` 로 앞자리
+  0 정규화)의 체결만 장부·킬스위치에 넣고, 나머지는 `foreign_fills` 와 `foreign_fill` 로그로 뺀다
+  (`own_orders_only=False` 는 계좌를 혼자 쓸 때만). 주문번호 없이 UNKNOWN 이 된 주문의 체결도 여기로
+  빠진다 — 사람이 확인한다.
+- **재시작하면 메모리 상태는 사라진다(후속 과제).** `own_orders`·분할 청산 누적 손익·킬스위치 상태는
+  복원되지 않는다. 재시작 전 주문의 체결은 `foreign_fills` 로 빠지니 `reconcile()` 로 대사할 것.
+- **`InstanceLock`** 은 같은 계좌를 도는 데몬이 두 번 뜨는 사고(2026-09-15 이중 매수 원인)를
+  `flock(LOCK_EX|LOCK_NB)` 로 막는다. 이미 잡혀 있으면 `AlreadyRunning` — 데몬은 이걸 정상 종료로
+  다뤄야 한다(재시작 루프가 계속 두 번째 인스턴스를 죽이면 안 된다).
+- **`OrderManager.reconcile()` 은 절대 주문을 내지 않는다.** 장부 vs `broker.holdings()` 차이를
+  보고만 한다 — 어느 쪽이 맞는지는 사람이 판단한다.
+
 ## 설계 원칙
 
 1. **이식은 수치 동일.** 소비 레포가 실매매일에 갈아탈 수 있어야 한다. 포트마다 원본
@@ -180,7 +308,7 @@ kqc runs ls scalp84-flow --repo-root ~/git/scalp-it
 ```bash
 uv sync --extra dev
 uv sync --extra dev --extra fast   # numba 경로까지
-uv run pytest -q        # 498 tests
+uv run pytest -q        # 656 tests (extra fast·opt 포함)
 uv run ruff check src tests
 ```
 
@@ -188,13 +316,15 @@ uv run ruff check src tests
 
 ## 로드맵
 
-- **v0.3** 키움 주문 HTTP 클라이언트 통합 — 지금은 scalp-it(원시 httpx)과 daytrade-it
-  (kiwoom-client 기반 `KiwoomBroker`)이 서로 다른 주문 스택을 쓴다. 가드·스펙은 공유했고
-  전송 계층은 실주문 대조 뒤에 합친다.
-- scalp-it `RiskGuard` 의 킬 판정을 `KillSwitch` 로 위임(대조 테스트는 이미 있음).
-- 이벤트 기반 일중 백테스트 엔진 — v0.2 에 초 격자 리플레이(`backtest.lob`)가 들어갔다. 남은 것:
-  ETF 호가단위(kiwoom-client 정본 추가 대기). 대기열 모델은 실주문 체결로 보정할 것.
-- PyPI 릴리스.
+- **v0.5** 로 주문 관리 계층(`execution.oms`)·`KiwoomBroker`/`PaperBroker`·`EngineCore`+
+  `backtest.replay`·`research.run_sweep`/`optuna_search`·`kqc nightly` 가 들어갔다(위 "공용
+  엔진" 참고). 남은 것: `poll_fills`(`ka10076`) 모의계좌 실호출 확인, scalp-it `RiskGuard` 킬
+  판정을 `KillSwitch` 로 위임(대조 테스트는 이미 있음), daytrade-it/scalp-it 실주문 경로를
+  코어 엔진으로 갈아타는 건 수치 동일성 증명이 끝난 부분부터 단계적으로.
+- ETF 호가단위(kiwoom-client 정본 추가 대기). 대기열 모델(`backtest.lob.queue`)은 실주문
+  체결로 계속 보정할 것.
+- `OrderManager` 재시작 복원(`own_orders`·분할 청산 누적·킬 상태), `execution.Trade`/`backtest.Trade`
+  이름 충돌 정리.
 
 ## 라이선스
 
