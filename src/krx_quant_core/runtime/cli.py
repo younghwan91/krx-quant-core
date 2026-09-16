@@ -7,6 +7,7 @@
     kqc runs sync ~/git/scalp-it
     kqc oos define scalp84-flow --start 2026-09-08 --end 2026-09-15 --repo-root .
     kqc prereg lock scalp84-flow docs/research/manju/84-...md --repo-root .
+    kqc nightly ~/git/scalp-it --dry-run                                    # simnode 에서
 
 ``kqc run`` 은 커밋·푸시된 sha 만 돌린다. simnode 에 ``~/.kqc/wt/<repo>-<sha12>`` 일회용
 worktree 를
@@ -28,6 +29,7 @@ from pathlib import Path
 from . import oos, runindex
 from .gitstate import validate_label
 from .host import BACKTEST_HOST
+from .nightly import run_nightly
 from .oos import RunRefused
 from .runs import read_runs
 
@@ -153,6 +155,17 @@ def _cmd_prereg_lock(a: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_nightly(a: argparse.Namespace) -> int:
+    results = run_nightly(a.repo_root, only=a.only, dry_run=a.dry_run)
+    failed = 0
+    for r in results:
+        status = r.skipped or ("timeout" if r.timed_out else "ok" if r.rc == 0 else f"rc={r.rc}")
+        print(f"{r.name:20}  {status:10}  {r.secs:8.1f}s")
+        if r.skipped is None and (r.timed_out or r.rc != 0):
+            failed += 1
+    return min(failed, 1)
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="kqc", description="simnode backtest run infrastructure")
     sub = p.add_subparsers(dest="cmd_name", required=True)
@@ -185,6 +198,12 @@ def _parser() -> argparse.ArgumentParser:
     lk.add_argument("doc")
     lk.add_argument("--repo-root", default=".")
     lk.set_defaults(func=_cmd_prereg_lock)
+
+    ni = sub.add_parser("nightly", help="run research/nightly.toml jobs on simnode")
+    ni.add_argument("repo_root")
+    ni.add_argument("--only", default=None)
+    ni.add_argument("--dry-run", action="store_true")
+    ni.set_defaults(func=_cmd_nightly)
     return p
 
 
