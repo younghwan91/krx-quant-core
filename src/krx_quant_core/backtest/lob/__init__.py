@@ -10,6 +10,15 @@ scalp-it 80·81·82번 연구 스크립트에 흩어져 있던 엔진을 모았�
 
 from ._jit import HAVE_NUMBA
 from .book import BookGrid, LevelTrades, build_book_grid, build_level_trades
+from .ceiling import (
+    DEFAULT_HORIZONS,
+    ceiling_table,
+    maker_pessimistic,
+    oracle_long,
+    oracle_short,
+    through_fill_second,
+    window_max,
+)
 from .control import DecisionBook, random_entry_control
 from .features import (
     INPUT_COLUMNS,
@@ -60,6 +69,13 @@ from .sim import (
 from .ticks import TickTable, stock_tick_table
 
 __all__ = [
+    "DEFAULT_HORIZONS",
+    "ceiling_table",
+    "maker_pessimistic",
+    "oracle_long",
+    "oracle_short",
+    "through_fill_second",
+    "window_max",
     "BookGrid",
     "DecisionBook",
     "EXIT_NONE",
