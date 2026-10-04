@@ -9,6 +9,7 @@
     kqc prereg lock scalp84-flow docs/research/manju/84-...md --repo-root .
     kqc nightly ~/git/scalp-it --dry-run                                    # simnode 에서
     kqc nightly status --days 7                 # 최근 야간 job 결과표, 최근 실패가 있으면 exit 1
+    kqc pins                                    # 소비 레포 핀 표, 뒤처진 레포가 있으면 exit 1
 
 ``kqc run`` 은 커밋·푸시된 sha 만 돌린다. simnode 에 ``~/.kqc/wt/<repo>-<sha12>`` 일회용
 worktree 를
@@ -32,6 +33,7 @@ from .gitstate import validate_label
 from .host import BACKTEST_HOST
 from .nightly import read_status, run_nightly
 from .oos import RunRefused
+from .pins import format_table, read_pins
 from .runs import read_runs
 
 __all__ = ["SSH_TARGET", "local_ref_check", "main", "remote_script"]
@@ -194,6 +196,13 @@ def _cmd_nightly_status(a: argparse.Namespace) -> int:
     return min(failed, 1)
 
 
+def _cmd_pins(a: argparse.Namespace) -> int:
+    pins = read_pins(Path(a.root).expanduser(), a.repos or None)
+    text, behind = format_table(pins)
+    print(text)
+    return min(behind, 1)
+
+
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="kqc", description="simnode backtest run infrastructure")
     sub = p.add_subparsers(dest="cmd_name", required=True)
@@ -237,6 +246,11 @@ def _parser() -> argparse.ArgumentParser:
     ni.add_argument("--days", type=int, default=7, help="status: how many recent days")
     ni.add_argument("--out", default=None, help="status: nightly out dir (default ~/.kqc/nightly)")
     ni.set_defaults(func=_cmd_nightly)
+
+    pi = sub.add_parser("pins", help="show which krx-quant-core version each consumer repo pins")
+    pi.add_argument("repos", nargs="*", help="repo dir names under --root (default: consumers)")
+    pi.add_argument("--root", default="~/git")
+    pi.set_defaults(func=_cmd_pins)
     return p
 
 
