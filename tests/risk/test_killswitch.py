@@ -244,3 +244,14 @@ def test_peak_tracks_intraday_high():
     assert ks.peak_realized_krw == 80_000
     assert ks.record_trade(-19_999, D) is None       # 40,001 > 40,000
     assert ks.record_trade(-1, D) == KILL_GIVEBACK   # 정확히 절반
+
+
+def test_refresh_rejudges_without_observing_a_date(tmp_path):
+    """realized 를 직접 놓고 refresh() — 날짜 관측 없이 판정만 다시 본다(scalp-it 관례)."""
+    ks = KillSwitch(KillSwitchConfig(daily_loss_limit_krw=1_000, profit_giveback_ratio=0.5,
+                                     profit_giveback_min_krw=100))
+    assert ks.refresh() is None
+    ks.realized_krw = 1_000.0
+    assert ks.refresh() is None and ks.peak_realized_krw == 1_000.0
+    ks.realized_krw = 500.0
+    assert ks.refresh() == KILL_GIVEBACK and ks.killed

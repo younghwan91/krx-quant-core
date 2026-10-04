@@ -151,6 +151,15 @@ class KillSwitch:
         self.observe(on)
         return self._refresh()
 
+    def refresh(self) -> str | None:
+        """날짜 관측 없이 지금 상태로 킬 사유를 다시 판정한다(정점 갱신 포함).
+
+        :meth:`check` 와 달리 :meth:`observe` 를 부르지 않는다 — 호출부가 ``realized_krw`` 를
+        직접 놓고 판정만 다시 보고 싶을 때(scalp-it ``RiskGuard._refresh_kill``·그 테스트)
+        쓴다. 날짜를 지어내 ``check`` 를 부르면 첫 관측이 그 날짜로 잡혀 상태를 왜곡한다.
+        """
+        return self._refresh()
+
     def stop_file_present(self) -> bool:
         sf = self.config.stop_file
         return bool(sf) and Path(sf).exists()
