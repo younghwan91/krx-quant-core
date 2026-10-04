@@ -28,12 +28,12 @@ Deflated Sharpe·purged CV 검증 통계를 한 패키지로 묶었다.
 ## 설치
 
 ```bash
-pip install krx-quant-core==0.5.1
-# 초 격자 호가 리플레이(backtest.lob)를 numba 로 가속하려면 extra 로: "krx-quant-core[fast]==0.5.1"
-# optuna 스윕(research.optuna_search)까지 쓰려면: "krx-quant-core[fast,opt]==0.5.1"
+pip install krx-quant-core==0.6.0
+# 초 격자 호가 리플레이(backtest.lob)를 numba 로 가속하려면 extra 로: "krx-quant-core[fast]==0.6.0"
+# optuna 스윕(research.optuna_search)까지 쓰려면: "krx-quant-core[fast,opt]==0.6.0"
 
 # PyPI 릴리스 전(또는 태그 고정 개발 중)에는 git 태그로:
-pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.5.1"
+pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.6.0"
 ```
 
 Python ≥ 3.11. 의존성은 `kiwoom-client`(호가단위 표의 정본), `numpy`, `pandas` 뿐이다.
@@ -50,12 +50,17 @@ krx_quant_core/
 │               키움 REST 주문 스펙, OrderIntent/OrderResult, OrderGuard(순수 가드)
 ├── risk/       DART 중대공시 분류·RiskGate, DartDisclosureDB, KillSwitch
 ├── backtest/   호가 스윕 VWAP·왕복비용, 지정가 체결 규칙, 트레이드 원장 지표, 횡단면 시뮬,
-│               replay.py(run_replay — EngineCore+PaperBroker 로 과거 이벤트 리플레이)
-│   └── lob/    틱·호가 → 초 격자 특징·경로, 배치=실시간 공용 커널, 에피소드 시뮬, 무작위 대조군, 지정가 대기열 모델
+│               replay.py(run_replay — EngineCore+PaperBroker 로 과거 이벤트 리플레이),
+│               drift.py(일중·야간 수익 분해 — 이 유니버스의 일중은 구조적으로 음수인가)
+│   └── lob/    틱·호가 → 초 격자 특징·경로, 배치=실시간 공용 커널, 에피소드 시뮬, 무작위 대조군, 지정가 대기열 모델,
+│               ceiling.py(오라클 천장 — 완벽한 예지력으로도 비용을 넘는가)
 ├── research/   run_sweep(격자·병렬·캐시), optuna_search(TPE, extra `opt`) — 둘 다 모든
 │               config 를 시행 원장에 적는다
-├── stats/      Deflated/Probabilistic Sharpe, t-haircut, purged walk-forward, 부트스트랩, 취약성
-└── runtime/    호스트 가드, 실행 기록 start_run, OOS 하드 잠금, kqc CLI(simnode 원격 실행 · kqc nightly)
+├── stats/      Deflated/Probabilistic Sharpe, t-haircut, purged walk-forward, 부트스트랩, 취약성,
+│               selection.py(후보 선택편향 — 검증 최대를 고른 값이 실력 없이 얼마나 오르나),
+│               matched_null.py(층 매칭 대조 + 날짜 클러스터 부트스트랩)
+└── runtime/    호스트 가드, 실행 기록 start_run, OOS 하드 잠금, kqc CLI(simnode 원격 실행 · kqc nightly ·
+                kqc nightly status · kqc pins)
 ```
 
 ```python
@@ -285,7 +290,14 @@ weekdays_only = true
 ```bash
 kqc nightly ~/git/scalp-it                       # 크론 한 줄(장 마감 후, simnode 전용)
 kqc nightly ~/git/scalp-it --only pair-sweep --dry-run
+kqc nightly status --days 7                      # 최근 레포×job 결과표. 최근 실패가 있으면 exit 1 (어느 호스트든)
+kqc pins                                         # 소비 레포가 핀한 코어 버전 표. 뒤처진 레포가 있으면 exit 1
 ```
+
+cron 의 PATH 는 `/usr/bin:/bin` 뿐이라 `uv` 처럼 `~/.local/bin` 에 있는 명령을 못 찾는다 — daytrade-it
+의 job 이 2026-09-23 부터 매일 rc=127 로 **조용히** 죽어 있었다(v0.6.0 에서 발견). 그래서 `cmd[0]` 을
+`~/.local/bin`·`~/.cargo/bin`·`/usr/local/bin` 을 보탠 PATH 에서 찾고 자식에게도 넘기며, 못 찾으면 찾아본
+경로를 로그에 적는다. 실패는 stderr 의 `kqc nightly: <repo> FAILED …` 한 줄과 `kqc nightly status` 로 보인다.
 
 ### 안전 규칙 — 지키는 것과 아직 못 미더운 것
 
@@ -316,6 +328,44 @@ kqc nightly ~/git/scalp-it --only pair-sweep --dry-run
   다뤄야 한다(재시작 루프가 계속 두 번째 인스턴스를 죽이면 안 된다).
 - **`OrderManager.reconcile()` 은 절대 주문을 내지 않는다.** 장부 vs `broker.holdings()` 차이를
   보고만 한다 — 어느 쪽이 맞는지는 사람이 판단한다.
+
+## 판정 축 (v0.6) — "우위가 있는가"를 세 레포가 같은 식으로 잰다
+
+2026-10-04 기준 실주문이 도는 레포가 없다. scalp-it 101번은 현물 일중 스캘핑을 **측정으로** 닫았다 —
+왕복 실비용 41.5bp 를 넘는 우위가 어떤 지평·유니버스·방향에도 없었다. 그 측정(95 천장·98 선택편향·
+101 드리프트·매치드 널)이 전부 scalp-it 스크립트에만 있어서 코어로 올렸다. 허위 우위로 실주문을 켜는
+사고를 세 레포가 같은 함수로 막는다. 전부 순수 함수고 **판정하지 않는다** — 문턱은 각 레포의 사전등록이 쓴다.
+
+```python
+from datetime import date
+import numpy as np
+from krx_quant_core.costs import round_trip_cost
+from krx_quant_core.backtest import drift_summary, intraday_overnight, rank_buckets
+from krx_quant_core.backtest.lob import ceiling_table
+from krx_quant_core.stats import matched_alpha, matched_control, selection_bias_report
+
+# 1. 오라클 천장 — 매도 시점을 사후에 완벽히 골라도 비용을 넘는가 (scalp-it 95)
+cost = round_trip_cost(date(2026, 10, 2), "KOSDAQ", slippage_one_way=0.0)   # 세금+수수료, 스프레드는 호가가 낸다
+t = ceiling_table([(path["bid"], path["ask"]) for path in paths], cost=cost, horizons=(10, 60, 300, 1800))
+t[t.kind == "taker"][["horizon", "median_bp", "frac_pos"]]      # 10초 테이커 중앙이 음수면 그 자리는 끝
+
+# 2. 선택편향 — 검증 일평균 최대로 고른 체크포인트는 실력 없이 몇 bp 오르나 (scalp-it 98)
+rep = selection_bias_report(val_log_rows)      # val_n·val_daymean_bp·val_mean_bp 열, pick() 과 같은 필터·동점 처리
+rep.premium_vs_random, rep.expected_max_curve  # rl92: 후보 24개·sd 58bp → +166bp 는 탐색만으로 나오는 값
+
+# 3. 일중·야간 분해 — 전일 거래대금 상위의 일중은 구조적으로 음수인가 (scalp-it 101 §1)
+d = intraday_overnight(daily)                              # open/close/prev_close → intraday_bp·overnight_bp
+d["bucket"] = rank_buckets(d, "turnover_prev", n=4)        # 전일 정보로만 버킷 (당일 값이면 look-ahead)
+drift_summary(d, "intraday_bp", by="bucket")               # mean_bp·neg_month_share(121개월 중 120개월)·t_hac
+
+# 4. 매치드 널 — 신호 뒤 수익이 같은 층(날짜×분×변동성×거래대금)의 무작위보다 큰가 (scalp-it 101 A)
+ctl = matched_control(trades, pool, strata=["date", "minute", "vol_q", "turnover_q"], n_per=5)
+a = matched_alpha(trades, pool, ctl, value="net_bp", cluster="date")   # 날짜 클러스터 부트스트랩
+a.alpha, a.ci_low, a.ci_high, a.by_stratum                              # 사전등록: CI 하한 > 0 이어야 통과
+```
+
+95·98 은 원본 스크립트와 **비트 단위로 같다**(골든 테스트가 원본 복사본을 대조). `through_fill_second` 는
+numba 커널이고 폴백도 같은 숫자다. `cost` 는 필수 인자 — 원본의 `COST = 0.0023` 상수를 박지 않았다.
 
 ## 설계 원칙
 
@@ -371,6 +421,10 @@ uv run ruff check src tests
 
 ## 로드맵
 
+- **v0.6** 로 판정 축(`backtest.lob.ceiling`·`stats.selection`·`backtest.drift`·`stats.matched_null`)과
+  `kqc nightly status`·`kqc pins` 가 들어갔다. 다음 순서: scalp-it 100번(분봉 275일 탐색)이 3·4 를 쓰게 →
+  엔진 A 마무리(두 데몬의 킬·장부를 `OrderManager` 로, 실주문이 멈춘 지금이 교체 비용이 가장 싸다) →
+  101번 B-2(주식선물 기초자산 드리프트)가 양수일 때만 kiwoom-client 선물 모듈·파생 비용 스케줄.
 - **v0.5** 로 주문 관리 계층(`execution.oms`)·`KiwoomBroker`/`PaperBroker`·`EngineCore`+
   `backtest.replay`·`research.run_sweep`/`optuna_search`·`kqc nightly` 가 들어갔다(위 "공용
   엔진" 참고). 남은 것: `poll_fills`(`ka10076`) 모의계좌 실호출 확인, scalp-it `RiskGuard` 킬

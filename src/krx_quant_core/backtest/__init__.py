@@ -11,12 +11,16 @@
 """
 
 from .crosssectional import rank_ic, rank_tilt_backtest, staggered_tranche_backtest
+from .drift import drift_summary, intraday_overnight, rank_buckets
 from .fills import EPS, FILL_BASES, FillBasis, limit_buy_filled, limit_sell_filled
 from .ledger import PerformanceMetrics, Trade, TradeResult, apply_costs, performance_metrics
 from .orderbook import Level, liquidity_size_multiplier, roundtrip_bp, sweep_vwap
 from .panels import adv_panel, forward_returns, lookup_panel, panel_pivot
 
 __all__ = [
+    "drift_summary",
+    "intraday_overnight",
+    "rank_buckets",
     "EPS",
     "FILL_BASES",
     "FillBasis",

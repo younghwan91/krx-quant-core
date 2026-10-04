@@ -26,6 +26,7 @@ from .fragility import (
     tail_removal,
     win_conditional,
 )
+from .matched_null import MatchedAlpha, cluster_bootstrap_ci, matched_alpha, matched_control
 from .metrics import (
     PPY,
     ann_sharpe,
@@ -39,6 +40,13 @@ from .metrics import (
     spearman,
     summarize_periods,
 )
+from .selection import (
+    SelectionBiasReport,
+    argmax_first,
+    eligible_rows,
+    expected_max_of_m,
+    selection_bias_report,
+)
 from .sharpe import (
     bootstrap_mean_ci,
     deflated_sharpe,
@@ -50,6 +58,15 @@ from .sharpe import (
 from .trials import config_fingerprint, count_trials, ledger_path, read_trials, record_trial
 
 __all__ = [
+    "MatchedAlpha",
+    "SelectionBiasReport",
+    "argmax_first",
+    "cluster_bootstrap_ci",
+    "eligible_rows",
+    "expected_max_of_m",
+    "matched_alpha",
+    "matched_control",
+    "selection_bias_report",
     "PPY",
     "Fold",
     "FoldMask",
