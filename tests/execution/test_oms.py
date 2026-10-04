@@ -622,3 +622,98 @@ def test_own_orders_only_false_applies_every_fill():
     )
     assert om.sync() == [foreign]
     assert om.book.position("000660").qty == 3 and om.foreign_fills == []
+
+
+# ------------------------------------------------------------------ 소비 레포 규약 스위치
+
+
+def test_preorder_holdings_check_blocks_held_code_and_fails_closed():
+    broker = PaperBroker(holdings={CODE: Holding(CODE, 1, 10_000.0)})
+    om, _, guard, _, _ = _oms(broker=broker)
+    om._preorder_holdings_check = True  # 생성자 인자와 같다 — 아래에서 생성자로도 확인
+    mr = om.buy(CODE, 1, 10_000, ref_price=10_000)
+    assert mr.status is OrderStatus.BLOCKED
+    assert CODE in guard.dynamic_buy_block
+    assert guard.count_total == 0  # 막힌 주문은 세지 않는다
+
+    clock = _Clock()
+    om2 = OrderManager(
+        _HoldingsFailBroker(), guard=_guard(clock), book=PositionBook(), clock=clock,
+        preorder_holdings_check=True,
+    )
+    mr = om2.buy(CODE, 1, 10_000, ref_price=10_000)
+    assert mr.status is OrderStatus.BLOCKED
+    assert (mr.result.blocked_reason or "").startswith("주문 직전 잔고조회 실패 → fail-closed")
+
+    om3 = OrderManager(_HoldingsFailBroker(), guard=_guard(clock), book=PositionBook(), clock=clock)
+    assert om3.buy(CODE, 1, 10_000, ref_price=10_000).status is OrderStatus.SUBMITTED  # 기본값 불변
+
+
+def test_guard_sells_applies_static_guard_and_counts():
+    clock = _Clock()
+    broker = PaperBroker(holdings={CODE: Holding(CODE, 10, 10_000.0)})
+    guard = _guard(clock, blocklist=frozenset({CODE}))
+    om = OrderManager(broker, guard=guard, book=PositionBook(), clock=clock, guard_sells=True)
+    mr = om.sell(CODE, 1, 10_000)
+    assert mr.status is OrderStatus.BLOCKED and "차단" in (mr.result.blocked_reason or "")
+
+    guard2 = _guard(clock, max_orders_total=1)
+    om2 = OrderManager(broker, guard=guard2, book=PositionBook(), clock=clock, guard_sells=True)
+    assert om2.sell(CODE, 1, 10_000).status is OrderStatus.SUBMITTED
+    assert guard2.count_total == 1
+    assert om2.sell(CODE, 1, 10_000).status is OrderStatus.BLOCKED  # 횟수 상한이 청산에도 적용
+
+    om3 = OrderManager(broker, guard=_guard(clock, blocklist=frozenset({CODE})),
+                       book=PositionBook(), clock=clock)
+    assert om3.sell(CODE, 1, 10_000).status is OrderStatus.SUBMITTED  # 기본값: 청산은 막지 않는다
+
+
+def test_count_rejected_counts_before_post():
+    clock = _Clock()
+    guard = _guard(clock)
+    om = OrderManager(_RejectBroker(), guard=guard, book=PositionBook(), clock=clock,
+                      count_rejected=True)
+    mr = om.buy(CODE, 1, 10_000, ref_price=10_000)
+    assert mr.status is OrderStatus.REJECTED
+    assert guard.count_total == 1  # scalp-it: POST 전에 센다
+    om_r = OrderManager(_RaisingBroker(), guard=guard, book=PositionBook(), clock=clock,
+                        count_rejected=True)
+    assert om_r.buy(CODE, 1, 10_000, ref_price=10_000).status is OrderStatus.UNKNOWN
+    assert guard.count_total == 2  # 이중 계수 없음
+
+
+class _ZeroCostBook(PositionBook):
+    """실현손익을 호출부가 정한 값으로 돌려주는 장부 — 승패 eps 경계만 보려고."""
+
+    def __init__(self, realized: float) -> None:
+        super().__init__()
+        self._fixed = realized
+
+    def apply(self, fill: Fill) -> float:
+        super().apply(fill)
+        return self._fixed if fill.side == "sell" else 0.0
+
+
+class _FillBroker(PaperBroker):
+    def __init__(self, fills: list[Fill]) -> None:
+        super().__init__()
+        self._pending = list(fills)
+
+    def poll_fills(self) -> list[Fill]:
+        out, self._pending = self._pending, []
+        return out
+
+
+@pytest.mark.parametrize("eps, killed", [(0.0, True), (1e-9, False)])
+def test_loss_eps_decides_breakeven_at_boundary(eps, killed):
+    """본전 청산(실현 −1e-12 원)이 eps=0 이면 손실, scalp-it eps=1e-9 면 승."""
+    kill = KillSwitch(KillSwitchConfig(max_consecutive_losses=1))
+    clock = _Clock()
+    fills = [
+        Fill(ord_no="1", code=CODE, side="buy", qty=1, price=10_000, ts=clock()),
+        Fill(ord_no="2", code=CODE, side="sell", qty=1, price=10_000, ts=clock()),
+    ]
+    om = OrderManager(_FillBroker(fills), guard=_guard(clock), book=_ZeroCostBook(-1e-12),
+                      kill=kill, clock=clock, own_orders_only=False, loss_eps=eps)
+    om.sync()
+    assert kill.killed is killed

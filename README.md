@@ -28,12 +28,12 @@ Deflated Sharpe·purged CV 검증 통계를 한 패키지로 묶었다.
 ## 설치
 
 ```bash
-pip install krx-quant-core==0.6.0
-# 초 격자 호가 리플레이(backtest.lob)를 numba 로 가속하려면 extra 로: "krx-quant-core[fast]==0.6.0"
-# optuna 스윕(research.optuna_search)까지 쓰려면: "krx-quant-core[fast,opt]==0.6.0"
+pip install krx-quant-core==0.6.1
+# 초 격자 호가 리플레이(backtest.lob)를 numba 로 가속하려면 extra 로: "krx-quant-core[fast]==0.6.1"
+# optuna 스윕(research.optuna_search)까지 쓰려면: "krx-quant-core[fast,opt]==0.6.1"
 
 # PyPI 릴리스 전(또는 태그 고정 개발 중)에는 git 태그로:
-pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.6.0"
+pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.6.1"
 ```
 
 Python ≥ 3.11. 의존성은 `kiwoom-client`(호가단위 표의 정본), `numpy`, `pandas` 뿐이다.
@@ -328,6 +328,10 @@ cron 의 PATH 는 `/usr/bin:/bin` 뿐이라 `uv` 처럼 `~/.local/bin` 에 있�
   다뤄야 한다(재시작 루프가 계속 두 번째 인스턴스를 죽이면 안 된다).
 - **`OrderManager.reconcile()` 은 절대 주문을 내지 않는다.** 장부 vs `broker.holdings()` 차이를
   보고만 한다 — 어느 쪽이 맞는지는 사람이 판단한다.
+- **소비 레포 규약 스위치(v0.6.1).** scalp-it `KiwoomOrderClient` 가 코어 매니저로 못 넘어오던 차이 네 가지를
+  옵션으로 열었다 — 기본값은 전부 위 원칙 그대로다. `preorder_holdings_check`(매수 직전 잔고조회, 실패 시
+  fail-closed 거부), `guard_sells`(청산도 가드·횟수 적용 — 양방향 차단 종목용), `count_rejected`(가드 통과
+  시점에 계수), `loss_eps`(본전을 승으로 보는 1e-9). 각 데몬의 현행 규약을 그대로 옮긴 뒤 바꿀지는 따로 정한다.
 
 ## 판정 축 (v0.6) — "우위가 있는가"를 세 레포가 같은 식으로 잰다
 
