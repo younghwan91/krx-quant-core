@@ -296,3 +296,42 @@ def test_numba_and_fallback_identical_v2(tmp_path):
     assert np.array_equal(fast["S"], slow["S"], equal_nan=True)
     assert np.array_equal(fast["S"], fast["F"], equal_nan=True)
     print(f"stream µs/update numba={float(fast['us']):.1f} fallback={float(slow['us']):.1f}")
+
+
+# ---- CSR 입력 검증 — 배치와 from_history 가 같은 검사를 한다 ----------------------------------
+
+
+def _csr_inputs(n: int = 5):
+    X = np.full((n, len(INPUT_COLUMNS_V2)), np.nan)
+    X[:, 0] = 1000.0
+    X[:, 1] = 1010.0
+    ptr = np.array([0, 1, 1, 3, 4, 4], np.int64)
+    price = np.array([1000.0, 1005.0, 1010.0, 1000.0])
+    vol = np.ones(4)
+    side = np.ones(4)
+    return X, ptr, price, vol, side
+
+
+@pytest.mark.parametrize(
+    "mutate, msg",
+    [
+        (lambda X, p, pr, v, s: (X, p, pr, v[:3], s), "equal length"),
+        (lambda X, p, pr, v, s: (X, p, pr[:3], v[:3], s[:3]), "mismatch with trade_ptr"),
+        (lambda X, p, pr, v, s: (X, np.array([1, 1, 1, 3, 4, 4]), pr, v, s), r"ptr\[0\] must be 0"),
+        (lambda X, p, pr, v, s: (X, np.array([0, 2, 1, 3, 4, 4]), pr, v, s), "non-decreasing"),
+        (lambda X, p, pr, v, s: (X, p[:-1], pr, v, s), "length n \\+ 1"),
+    ],
+)
+def test_batch_and_from_history_reject_malformed_csr(mutate, msg):
+    args = mutate(*_csr_inputs())
+    with pytest.raises(ValueError, match=msg):
+        compute_features_v2(*args)
+    with pytest.raises(ValueError, match=msg):
+        SecondFeatureStreamV2.from_history(*args)
+
+
+def test_well_formed_csr_is_accepted_by_both():
+    X, ptr, price, vol, side = _csr_inputs()
+    F = compute_features_v2(X, ptr, price, vol, side)
+    s = SecondFeatureStreamV2.from_history(X, ptr, price, vol, side)
+    assert F.shape[0] == 5 and s.seconds == 5

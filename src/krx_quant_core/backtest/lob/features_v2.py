@@ -538,6 +538,28 @@ def _f64(a: ArrayLike) -> NDArray[np.float64]:
     return np.ascontiguousarray(a, dtype=np.float64)
 
 
+def _check_csr(
+    n: int, ptr: NDArray[np.int64], price: NDArray[np.float64], vol: NDArray[np.float64],
+    side: NDArray[np.float64],
+) -> None:  # fmt: skip
+    """체결 CSR 입력 검증 — 배치(:func:`compute_features_v2`)와 복구(``from_history``)가 같이 쓴다.
+
+    커널은 numba 경로에서 경계 검사를 하지 않는다. 길이가 안 맞거나 ``ptr`` 이 깨진 채 들어가면
+    예외 없이 엉뚱한 메모리를 읽어 그날 피처 전부가 조용히 틀어진다 — 장중 재시작 복구에서 특히
+    위험하다(틱 로그 일부만 읽어 CSR 을 만든 경우). 그래서 진입점에서 전부 막는다.
+    """
+    if ptr.shape != (n + 1,):
+        raise ValueError("trade_ptr must have length n + 1")
+    if not (len(price) == len(vol) == len(side)):
+        raise ValueError("trade arrays length mismatch: price, volume, side must have equal length")
+    if ptr[0] != 0:
+        raise ValueError("trade_ptr[0] must be 0")
+    if ptr[-1] > len(price):
+        raise ValueError("trade arrays length mismatch with trade_ptr")
+    if n and np.any(np.diff(ptr) < 0):
+        raise ValueError("trade_ptr must be non-decreasing")
+
+
 def compute_features_v2(
     inputs: ArrayLike,
     trade_ptr: ArrayLike,
@@ -561,10 +583,7 @@ def compute_features_v2(
         raise ValueError(f"inputs must be (n, {len(INPUT_COLUMNS_V2)})")
     ptr = np.ascontiguousarray(trade_ptr, dtype=np.int64)
     price, vol, side = _f64(trade_price), _f64(trade_volume), _f64(trade_side)
-    if ptr.shape != (X.shape[0] + 1,):
-        raise ValueError("trade_ptr must have length n + 1")
-    if not (len(price) == len(vol) == len(side)) or (len(ptr) and ptr[-1] > len(price)):
-        raise ValueError("trade arrays length mismatch with trade_ptr")
+    _check_csr(X.shape[0], ptr, price, vol, side)
     tt = tick_table or stock_tick_table()
     state, hist = new_state_v2()
     F = _run_v2(X, ptr, price, vol, side, state, hist, tt.bounds, tt.ticks, tt.top)
@@ -679,9 +698,8 @@ class SecondFeatureStreamV2:
         if X.ndim != 2 or X.shape[1] != len(INPUT_COLUMNS_V2):
             raise ValueError(f"inputs must be (n, {len(INPUT_COLUMNS_V2)})")
         ptr = np.asarray(trade_ptr, dtype=np.int64)
-        if ptr.shape != (X.shape[0] + 1,):
-            raise ValueError("trade_ptr must have length n + 1")
         price, vol, side = _f64(trade_price), _f64(trade_volume), _f64(trade_side)
+        _check_csr(X.shape[0], ptr, price, vol, side)
         s = cls(tick_table=tick_table)
         for t in range(X.shape[0]):
             a, b = int(ptr[t]), int(ptr[t + 1])
