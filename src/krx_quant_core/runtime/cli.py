@@ -8,6 +8,7 @@
     kqc oos define scalp84-flow --start 2026-09-08 --end 2026-09-15 --repo-root .
     kqc prereg lock scalp84-flow docs/research/manju/84-...md --repo-root .
     kqc nightly ~/git/scalp-it --dry-run                                    # simnode 에서
+    kqc nightly status --days 7                 # 최근 야간 job 결과표, 최근 실패가 있으면 exit 1
 
 ``kqc run`` 은 커밋·푸시된 sha 만 돌린다. simnode 에 ``~/.kqc/wt/<repo>-<sha12>`` 일회용
 worktree 를
@@ -29,7 +30,7 @@ from pathlib import Path
 from . import oos, runindex
 from .gitstate import validate_label
 from .host import BACKTEST_HOST
-from .nightly import run_nightly
+from .nightly import read_status, run_nightly
 from .oos import RunRefused
 from .runs import read_runs
 
@@ -156,13 +157,40 @@ def _cmd_prereg_lock(a: argparse.Namespace) -> int:
 
 
 def _cmd_nightly(a: argparse.Namespace) -> int:
+    if a.repo_root == "status":
+        return _cmd_nightly_status(a)
     results = run_nightly(a.repo_root, only=a.only, dry_run=a.dry_run)
-    failed = 0
+    failed: list[str] = []
     for r in results:
         status = r.skipped or ("timeout" if r.timed_out else "ok" if r.rc == 0 else f"rc={r.rc}")
         print(f"{r.name:20}  {status:10}  {r.secs:8.1f}s")
         if r.skipped is None and (r.timed_out or r.rc != 0):
-            failed += 1
+            failed.append(f"{r.name}({status})")
+    if failed:
+        # cron 로그에서 grep 한 줄로 잡히게 — 요약 JSON 만 보고는 아무도 실패를 못 봤다.
+        repo = Path(a.repo_root).resolve().name
+        print(f"kqc nightly: {repo} FAILED {' '.join(failed)}", file=sys.stderr)
+    return min(len(failed), 1)
+
+
+def _cmd_nightly_status(a: argparse.Namespace) -> int:
+    rows = read_status(a.out, days=a.days, warn=lambda m: print(m, file=sys.stderr))
+    if not rows:
+        print("kqc nightly status: 기록 없음")
+        return 0
+    dates = sorted({d for r in rows for d in r.by_date})
+    short = [d[5:] for d in dates]  # MM-DD
+    width = max(len(f"{r.repo}/{r.name}") for r in rows)
+    print(f"{'repo/job':{width}}  " + "  ".join(f"{d:>7}" for d in short) + "  streak")
+    failed = 0
+    for r in rows:
+        cells = []
+        for d in dates:
+            s = r.by_date.get(d, "-")
+            cells.append(f"{(s if len(s) <= 7 else s[:7]):>7}")
+        mark = f"{r.fail_streak}d FAIL" if r.latest_failed else ""
+        print(f"{r.repo + '/' + r.name:{width}}  " + "  ".join(cells) + f"  {mark}")
+        failed += r.latest_failed
     return min(failed, 1)
 
 
@@ -199,10 +227,15 @@ def _parser() -> argparse.ArgumentParser:
     lk.add_argument("--repo-root", default=".")
     lk.set_defaults(func=_cmd_prereg_lock)
 
-    ni = sub.add_parser("nightly", help="run research/nightly.toml jobs on simnode")
-    ni.add_argument("repo_root")
+    ni = sub.add_parser(
+        "nightly",
+        help="run research/nightly.toml jobs on simnode; `kqc nightly status` shows recent results",
+    )
+    ni.add_argument("repo_root", help="repo path, or the word 'status'")
     ni.add_argument("--only", default=None)
     ni.add_argument("--dry-run", action="store_true")
+    ni.add_argument("--days", type=int, default=7, help="status: how many recent days")
+    ni.add_argument("--out", default=None, help="status: nightly out dir (default ~/.kqc/nightly)")
     ni.set_defaults(func=_cmd_nightly)
     return p
 

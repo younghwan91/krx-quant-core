@@ -108,3 +108,34 @@ def test_run_splits_command_at_double_dash(monkeypatch):
 def test_run_without_command_is_usage_error(capsys):
     assert cli.main(["run", "scalp-it"]) == 2
     assert "usage" in capsys.readouterr().err
+
+
+def test_nightly_status_subcommand_exit_code_and_table(tmp_path, capsys):
+    import json
+
+    out = tmp_path / "nightly"
+    ok = {"name": "smoke", "rc": 0, "secs": 1.0, "timed_out": False, "skipped": None}
+    (out / "2026-09-23").mkdir(parents=True)
+    (out / "2026-09-23" / "dt.json").write_text(json.dumps([{**ok, "rc": 127}]))
+    (out / "2026-09-23" / "sc.json").write_text(json.dumps([ok]))
+
+    assert cli.main(["nightly", "status", "--out", str(out), "--days", "30"]) == 1
+    text = capsys.readouterr().out
+    assert "dt/smoke" in text and "rc=127" in text and "1d FAIL" in text
+    assert "sc/smoke" in text
+
+    (out / "2026-09-23" / "dt.json").write_text(json.dumps([ok]))
+    assert cli.main(["nightly", "status", "--out", str(out), "--days", "30"]) == 0
+
+
+def test_nightly_prints_failed_line_to_stderr(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("krx_quant_core.runtime.host.socket.gethostname", lambda: "simnode")
+    monkeypatch.setenv("HOME", str(tmp_path))  # ~/.kqc/nightly 를 tmp 로
+    repo = tmp_path / "myrepo"
+    (repo / "research").mkdir(parents=True)
+    (repo / "research" / "nightly.toml").write_text(
+        '[[job]]\nname = "bad"\ncmd = ["false"]\nweekdays_only = false\n'
+    )
+    assert cli.main(["nightly", str(repo)]) == 1
+    err = capsys.readouterr().err
+    assert "kqc nightly: myrepo FAILED bad(rc=1)" in err
