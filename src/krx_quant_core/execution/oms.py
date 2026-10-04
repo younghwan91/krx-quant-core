@@ -178,6 +178,20 @@ class OrderManager:
 
     ``own_orders_only``(기본 ``True``)면 :meth:`sync` 는 :attr:`own_orders` 의 체결만
     반영한다(공유 계좌 — 모듈 docstring). 계좌를 혼자 쓰는 게 확실할 때만 ``False``.
+
+    **소비 레포 규약 스위치**(기본값은 전부 위 규칙 그대로 — 2026-10-05 감사에서 scalp-it
+    ``KiwoomOrderClient`` 가 코어 매니저로 갈아타지 못하던 차이 네 가지를 옵션으로 열었다):
+
+    - ``preorder_holdings_check``: 매수 직전 ``broker.holdings()`` 를 조회해 보유 종목을 매수
+      차단에 병합하고(:meth:`OrderGuard.holdings_reason`), 조회가 **실패하면 주문을 거부**한다
+      (fail-closed — 사유 ``주문 직전 잔고조회 실패 → fail-closed 로 주문 거부: …``).
+    - ``guard_sells``: 청산도 가드의 정적 판정(차단·화이트리스트·수량·밴드)과 횟수 상한을
+      거치고 횟수에 센다. scalp-it 은 ``HELD_STOCK_CODES`` 를 어느 방향으로도 건드리지 않으려고
+      이렇게 한다. 기본 ``False`` 가 코어 원칙("청산은 막지 않는다")이다.
+    - ``count_rejected``: 가드를 통과한 주문은 브로커가 거부(rc≠0)해도 센다(scalp-it 은 POST
+      전에 센다). 기본 ``False`` 는 "나간 주문만 센다".
+    - ``loss_eps``: 승패 판정에서 ``cum < -loss_eps`` 를 손실로 본다. scalp-it 은 ``1e-9``
+      (본전은 승).
     """
 
     def __init__(
@@ -190,6 +204,10 @@ class OrderManager:
         clock: Callable[[], datetime] = now_kst,
         order_log: Path | str | None = None,
         own_orders_only: bool = True,
+        preorder_holdings_check: bool = False,
+        guard_sells: bool = False,
+        count_rejected: bool = False,
+        loss_eps: float = 0.0,
     ) -> None:
         self.broker = broker
         self.guard = guard
@@ -198,6 +216,10 @@ class OrderManager:
         self._clock = clock
         self._order_log = Path(order_log) if order_log is not None else None
         self._own_orders_only = own_orders_only
+        self._preorder_holdings_check = preorder_holdings_check
+        self._guard_sells = guard_sells
+        self._count_rejected = count_rejected
+        self._loss_eps = float(loss_eps)
         #: 이 매니저가 낸 주문번호(정규화). 상태가 SUBMITTED·UNKNOWN 이고 번호가 있는 것.
         self.own_orders: set[str] = set()
         #: 다른 주체(같은 계좌의 다른 데몬·HTS 수동 주문 등)의 체결 — 장부·킬에 반영 안 함.
@@ -232,14 +254,29 @@ class OrderManager:
         guard_reason = self.guard.reason(intent, ref_price)
         if guard_reason:
             return self._finish(self._blocked(intent, guard_reason))
+        if self._preorder_holdings_check:
+            holdings_reason = self._holdings_reason(intent)
+            if holdings_reason:
+                return self._finish(self._blocked(intent, holdings_reason))
+        if self._count_rejected:
+            self.guard.record_order(code)  # scalp-it 규약: 가드 통과 = 1건, POST 결과 무관
         try:
             result = self.broker.submit(intent)
         except Exception as e:  # 어떤 브로커 예외든 기록하고 계속 돈다
-            self.guard.record_order(code)
+            if not self._count_rejected:
+                self.guard.record_order(code)
             return self._finish(self._errored(intent, e), OrderStatus.UNKNOWN, track=True)
-        if result.ok or _is_unknown(result):  # dry-run 통과·제출 성공·나갔는지 모름
-            self.guard.record_order(code)
+        if not self._count_rejected and (result.ok or _is_unknown(result)):
+            self.guard.record_order(code)  # dry-run 통과·제출 성공·나갔는지 모름
         return self._finish(result, track=True)
+
+    def _holdings_reason(self, intent: OrderIntent) -> str | None:
+        """매수 직전 잔고조회 → 보유 종목 매수 차단 병합. 조회 실패는 fail-closed(거부)."""
+        try:
+            held = list(self.broker.holdings().keys())
+        except Exception as e:
+            return f"주문 직전 잔고조회 실패 → fail-closed 로 주문 거부: {e}"
+        return self.guard.holdings_reason(intent, held)
 
     def sell(
         self, code: str, qty: int, price: int, *, ref_price: float | None = None
@@ -259,8 +296,12 @@ class OrderManager:
         ``ref_price`` 는 매수와 호출 모양을 맞추려고 받을 뿐 판정에 쓰지 않는다 — 급락 중
         청산 지정가가 밴드 밖이라고 막히면 안 된다.
         """
-        del ref_price
         intent = OrderIntent(side="sell", code=code, qty=qty, price=price)
+        if self._guard_sells:
+            guard_reason = self.guard.reason(intent, ref_price)
+            if guard_reason:
+                return self._finish(self._blocked(intent, guard_reason))
+        del ref_price
         if qty < 1:
             return self._finish(self._blocked(intent, f"청산 수량이 1주 미만: {qty}"))
         held = self._held_for_exit(code)
@@ -272,10 +313,16 @@ class OrderManager:
                 )
         if price <= 0:
             return self._finish(self._blocked(intent, f"지정가가 0 이하: {price}"))
+        if self._guard_sells and self._count_rejected:
+            self.guard.record_order(code)
         try:
             result = self.broker.submit(intent)
         except Exception as e:
+            if self._guard_sells and not self._count_rejected:
+                self.guard.record_order(code)
             return self._finish(self._errored(intent, e), OrderStatus.UNKNOWN, track=True)
+        if self._guard_sells and not self._count_rejected and (result.ok or _is_unknown(result)):
+            self.guard.record_order(code)
         return self._finish(result, track=True)
 
     def cancel(self, ord_no: str, intent: OrderIntent) -> ManagedResult:
@@ -354,7 +401,7 @@ class OrderManager:
             else:
                 self._open_realized.pop(fill.code, None)
                 if self.kill is not None:
-                    self.kill.record_trade(realized, on=on, is_loss=cum < 0)
+                    self.kill.record_trade(realized, on=on, is_loss=cum < -self._loss_eps)
         return fills
 
     def reconcile(self) -> ReconcileReport:
