@@ -17,9 +17,11 @@ swing-it 은 ``daily_bars_adjusted`` 를 매 실행 ``SELECT *`` 로 통째 읽�
 
 from __future__ import annotations
 
+import math
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
 import numpy as np
@@ -112,6 +114,8 @@ def load_daily_bars(
         codes: 이 종목만(캐시는 연도 전체로 만들고 잘라낸다).
         store: ``None`` → 기본 캐시, ``False`` → 캐시 안 씀.
     """
+    if isinstance(codes, str):
+        raise TypeError("codes must be a sequence of codes, not a str (wrap it: [code])")
     a, b = _as_day(start), _as_day(end)
     if a > b:
         raise ValueError("start must be <= end")
@@ -136,13 +140,21 @@ def load_daily_bars(
             key = str(y)
             fp = _fingerprint(c, table, ylo, yhi)
             meta = cache.meta(key) or {}
-            if cache.has(key, (*want, "codes")) and meta.get("info", {}).get("fingerprint") == fp:
-                parts = cache.read(key, want, mmap=True)
-                parts.update(cache.read(key, ["codes"], mmap=False))
-            else:
-                parts = _fetch(c, table, ylo, yhi)
-                rows = {k: v for k, v in parts.items() if k != "codes"}
-                cache.write(key, rows, aux={"codes": parts["codes"]}, info={"fingerprint": fp})
+            if not (
+                cache.has(key, (*want, "codes")) and meta.get("info", {}).get("fingerprint") == fp
+            ):
+                with cache.lock(key):  # 워커 여럿이 같은 해를 동시에 받지 않게 잠근 채 다시 확인
+                    meta = cache.meta(key) or {}
+                    if meta.get("info", {}).get("fingerprint") != fp:
+                        parts = _fetch(c, table, ylo, yhi)
+                        rows = {k: v for k, v in parts.items() if k != "codes"}
+                        # 새 날짜가 붙으면 행 수가 바뀐다 — 새 세대로 통째 교체.
+                        cache.write(
+                            key, rows, aux={"codes": parts["codes"]}, info={"fingerprint": fp},
+                            replace=True, locked=True,
+                        )  # fmt: skip
+            parts = cache.read(key, want, mmap=True)
+            parts.update(cache.read(key, ["codes"], mmap=False))
             out.append(parts)
         return out
 
@@ -214,7 +226,11 @@ def daily_panel(
     if isinstance(bars["code"].dtype, pd.CategoricalDtype):
         codes_all = np.asarray(bars["code"].cat.categories, dtype="<U6")
         ci = bars["code"].cat.codes.to_numpy(np.int64)
+        if (ci < 0).any():
+            raise ValueError("bars has missing codes")
     else:
+        if bars["code"].isna().any():
+            raise ValueError("bars has missing codes")
         codes_all, ci = np.unique(bars["code"].astype(str).to_numpy(), return_inverse=True)
     day = bars["date"].to_numpy("datetime64[D]").astype(np.int64)
     key = (ci << 20) | (day - (day.min() if len(day) else 0))
@@ -240,7 +256,16 @@ def daily_panel(
     return DailyPanel(codes.astype("<U6"), dates, vals)
 
 
-_CAL_MEMO: dict[tuple[date, date], TradingCalendar] = {}
+_CAL_MEMO: dict[tuple[date, date], tuple[TradingCalendar, float]] = {}
+#: 직전 평일이 아직 없는(수집 실패·재시도 전) 달력을 다시 묻기까지의 초.
+_STALE_TTL = 600.0
+
+
+def _previous_weekday(d: date) -> date:
+    p = d - timedelta(days=1)
+    while p.weekday() >= 5:
+        p -= timedelta(days=1)
+    return p
 
 
 def trading_calendar(
@@ -253,13 +278,16 @@ def trading_calendar(
     """``daily_bars`` 에 관측된 거래일 → :class:`TradingCalendar`. KST 하루 한 번 DB, 나머지는 캐시.
 
     오늘 장이 끝나 일봉이 들어오기 전에는 오늘이 달력에 없다 — ``previous_session(오늘)`` 은 그래도
-    맞다(어제 이전 마지막 거래일).
+    맞다(어제 이전 마지막 거래일). 단, 달력의 마지막 날이 **직전 평일보다 이르면**(전일 일봉 수집이
+    실패해 다음 날 10:05 재시도를 기다리는 중이거나, 직전 평일이 휴장일) 디스크에 캐시하지 않고 10분
+    뒤 다시 묻는다 — 하루 종일 하루 늦은 달력을 쓰는 사고를 막는다
+    (휴장 다음 날엔 10분마다 0.7s 쿼리).
     """
     s = _as_day(start)
     t = today or _today_kst()
     memo = _CAL_MEMO.get((s, t))
-    if memo is not None:
-        return memo
+    if memo is not None and time.monotonic() < memo[1]:
+        return memo[0]
     cache: ColumnStore | None
     if store is False:
         cache = None
@@ -270,6 +298,7 @@ def trading_calendar(
     key = f"{s.isoformat()}@{t.isoformat()}"
     if cache is not None and cache.has(key, ("date",)):
         days = cache.read(key, ["date"], mmap=False)["date"]
+        fresh = True
     else:
 
         def run(c: Any) -> NDArray[Any]:
@@ -278,8 +307,9 @@ def trading_calendar(
             return df["date"].to_numpy("datetime64[D]")
 
         days = _with_conn(conn, run)
-        if cache is not None:
+        fresh = bool(len(days)) and days[-1] >= np.datetime64(_previous_weekday(t))
+        if cache is not None and fresh:
             cache.write(key, {"date": days})
     cal = TradingCalendar(pd.DatetimeIndex(days).date)
-    _CAL_MEMO[(s, t)] = cal
+    _CAL_MEMO[(s, t)] = (cal, math.inf if fresh else time.monotonic() + _STALE_TTL)
     return cal

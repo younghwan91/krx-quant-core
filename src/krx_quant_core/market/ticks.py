@@ -145,9 +145,10 @@ def tick_size_array(prices: Any, *, etf: bool = False) -> NDArray[np.float64]:
     """
     p = np.asarray(prices, dtype=np.float64)
     bounds, ticks = ETF_TICK_BANDS if etf else (_BOUNDS, _TICKS)
-    out = np.asarray(ticks, np.float64)[np.searchsorted(np.asarray(bounds), p, side="right")]
-    out[~(p > 0)] = np.nan
-    return out
+    flat = np.atleast_1d(p)
+    out = np.asarray(ticks, np.float64)[np.searchsorted(np.asarray(bounds), flat, side="right")]
+    out[~(flat > 0)] = np.nan
+    return out.reshape(p.shape)
 
 
 def ticks_in_float(width: float, price: float) -> float:

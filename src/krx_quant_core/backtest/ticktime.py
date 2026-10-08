@@ -21,6 +21,17 @@ from .lob._jit import njit
 __all__ = ["forward_max_last", "trailing_sums"]
 
 
+def _check_ts(ts: Any) -> NDArray[np.float64]:
+    t = np.ascontiguousarray(ts, dtype=np.float64)
+    if t.ndim != 1:
+        raise ValueError("ts must be 1-D")
+    if not np.isfinite(t).all():
+        raise ValueError("ts must be finite")
+    if len(t) > 1 and (np.diff(t) < 0).any():
+        raise ValueError("ts must be non-decreasing")
+    return t
+
+
 @njit
 def _trailing(
     ts: NDArray[np.float64], vals: NDArray[np.float64], window: float
@@ -55,11 +66,9 @@ def trailing_sums(
     Returns:
         ``(sums, count)`` — ``sums`` 는 ``(len(values), n)``, ``count`` 는 int64 ``(n,)``.
     """
-    t = np.ascontiguousarray(ts, dtype=np.float64)
-    if t.ndim != 1:
-        raise ValueError("ts must be 1-D")
-    if len(t) > 1 and (np.diff(t) < 0).any():
-        raise ValueError("ts must be non-decreasing")
+    if not window > 0:
+        raise ValueError("window must be > 0")  # 0 이하면 왼쪽 포인터가 배열 끝을 넘는다
+    t = _check_ts(ts)
     v = np.ascontiguousarray(np.vstack([np.asarray(x, np.float64) for x in values]))
     if v.shape[1] != len(t):
         raise ValueError("every value array must have len(ts) entries")
@@ -104,10 +113,10 @@ def forward_max_last(
     ``price[last] / entry - 1`` (scalp-it ``tick_sanity.forward_labels_all`` 과 같은 값).
     **미래를 본다** — 라벨 전용.
     """
-    t = np.ascontiguousarray(ts, dtype=np.float64)
+    if not horizon >= 0:
+        raise ValueError("horizon must be >= 0")
+    t = _check_ts(ts)
     p = np.ascontiguousarray(price, dtype=np.float64)
-    if t.shape != p.shape or t.ndim != 1:
+    if t.shape != p.shape:
         raise ValueError("ts and price must be 1-D of equal length")
-    if len(t) > 1 and (np.diff(t) < 0).any():
-        raise ValueError("ts must be non-decreasing")
     return _forward(t, p, float(horizon))  # type: ignore[no-any-return]

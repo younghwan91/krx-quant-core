@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import io
+import math
 import os
 import re
 from collections.abc import Mapping, Sequence
@@ -19,6 +20,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 __all__ = ["code_list", "connect", "fetch_frame", "is_postgres", "resolve_dsn", "sql_literal"]
@@ -105,8 +107,13 @@ def sql_literal(value: Any) -> str:
         return f"'{value.isoformat(sep=' ')}'"
     if isinstance(value, date):
         return f"'{value.isoformat()}'"
-    if isinstance(value, int | float):
-        return repr(value)
+    if isinstance(value, int | np.integer):
+        return str(int(value))
+    if isinstance(value, float | np.floating):
+        v = float(value)
+        if not math.isfinite(v):
+            raise ValueError(f"refusing to inline non-finite {value!r}")
+        return repr(v)
     if isinstance(value, str) and _CODE.match(value):
         return f"'{value}'"
     raise ValueError(f"refusing to inline {value!r} into SQL")
@@ -171,5 +178,6 @@ def fetch_frame(
             if c in df.columns and c not in timestamps:
                 df[c] = df[c].astype(t)
     for c in timestamps:
-        df[c] = pd.to_datetime(df[c])
+        # Postgres 는 소수 초 끝 0 을 지워 "…:02"·"…:02.5" 가 섞여 나온다 — 형식 추론 대신 ISO8601.
+        df[c] = pd.to_datetime(df[c], format="ISO8601")
     return df

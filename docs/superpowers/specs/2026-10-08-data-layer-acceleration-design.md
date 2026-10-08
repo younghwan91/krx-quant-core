@@ -27,24 +27,27 @@
 |---|---|
 | `db` | `resolve_dsn()`(인자 → `KR_QUANT_DB` → `KQC_ENV_FILE`/`.env` 탐색), `connect()`(psycopg3 우선, 없으면 psycopg2), `fetch_frame()` — Postgres 는 `COPY … TO STDOUT (FORMAT csv)` + pandas C 파서(`read_sql` 대비 1.7×, 실측 7.6s→4.5s/일), 그 밖의 DB-API(sqlite 테스트)는 커서. |
 | `store` | `ColumnStore` — `{root}/{dataset}/v{N}/{key}/{col}.npy` + `meta.json`. 열 단위로 쓰고 `mmap_mode="r"` 로 읽는다(16 워커 스윕이 같은 페이지 캐시를 공유, 필요한 열만 디스크에서 올라옴). 원자적 쓰기(임시 파일 → `os.replace`), 열 추가는 `flock`. 의존성 없음(pyarrow 불필요 — 소비 레포 둘에 없다). |
-| `intraday` | `CodeDay`(종목별 CSR: `codes`·`ptr`·열 배열) + `load_ticks(day)`·`load_quotes(day, levels)`·`load_minute_bars(day)`. 시각은 `sec`(자정 기준 int32 초), 가격 int32, 수량 int64, 방향 int8, 강도 float32. `CodeDay.frame(code)` 가 `lob.build_second_grid` 가 받는 DataFrame(`ts` 복원)을 낸다. **닫힌 날(KST 오늘 이전)만** 캐시 — 오늘은 매번 DB. |
-| `daily` | `load_daily_bars(start, end, adjusted=)` 긴 프레임(`code` 범주형) + `daily_panel()` → `DailyPanel(codes, dates, 값 배열)` 방향 명시(`frame(field, orient=)`). 수정주가는 매일 재계산되므로 캐시 키에 범위의 `(count, max(date), sum(close))` 지문을 넣는다. |
-| `calendar` | `trading_calendar()` — `daily_bars` 의 distinct date(0.76s)를 하루 한 번 디스크 캐시 → `TradingCalendar`. |
+| `intraday` | `CodeDay`(종목별 CSR: `codes`·`ptr`·열 배열) + `load_ticks(day)`·`load_quotes(day, levels)`·`load_minute_bars(day)`. 시각은 `sec`(자정 기준 int32 초), 가격 int32, 수량 int64, 방향 int8, 강도 float64(DB 비트 동일 — float32 는 피처 골든을 깬다). `CodeDay.frame(code)` 가 `lob.build_second_grid` 가 받는 DataFrame(`ts` 복원)을 낸다. **닫힌 날(KST 오늘 이전)만** 캐시 — 오늘은 매번 DB, 행 0 인 날은 캐시 안 함, 백필 뒤엔 `refresh=True`. 정수열은 int64 로 파싱 후 범위 검사(C 파서에 int32 를 주면 조용히 wrap). |
+| `daily` | `load_daily_bars(start, end, adjusted=)` 긴 프레임(`code` 범주형) + `daily_panel()` → `DailyPanel(codes, dates, 값 배열)` 방향 명시(`frame(field, orient=)`). 캐시는 **연도별**, 지문 `(count, max(date), Σround(close×100), Σvolume)` 정수 합(float 합은 PG 병렬 집계에서 흔들린다). 지문이 바뀐 해만 새 세대로 통째 교체. |
+| (daily 안) | `trading_calendar()` — `daily_bars` 의 distinct date(0.76s)를 하루 한 번 디스크 캐시 → `TradingCalendar`. 직전 평일이 없으면(수집 실패) 캐시 안 하고 10분 뒤 재질의. |
 
-## 가속·메모리(기존 API, 값 동일)
+## 가속·메모리(기존 API, 값 동일) — 실제 반영분
 
-- `market.ticks.tick_size_array(prices)` — 벡터 호가단위(`searchsorted`, import 시 정본 대조), ETF 표
-  `ETF_TICK_TABLE`; `tick_size_int` 는 같은 float 표로(정본과 경계 대조 테스트).
-- `backtest.panels`: `pivot_table` → 중복 제거 + `unstack`(결과 동일 테스트), `adv_panel` 은
-  `groupby().rolling()`.
-- `crosssectional._trailing_adv`: 날짜 루프 → 누적합 창(numba 커널, nanmean 과 대조).
-- `stats.metrics.paired_bootstrap`: 난수 소비 순서 그대로, 통계 계산만 행렬로.
-- `stats.matched_null.matched_control`: 자기 제외를 배열 복사 대신 인덱스 이동으로(난수 동일).
+- `backtest.lob.ceiling`·`features.forward_labels`: 미래 창 극값 O(n·h) → 단조 덱 O(n)(`lob._window`).
+- `market.ticks.tick_size_int` float 밴드 이분탐색, `tick_size_array(prices, etf=)`, `ETF_TICK_BANDS`,
+  `lob.etf_tick_table()`.
+- `backtest.ticktime.trailing_sums`·`forward_max_last` — scalp-it `tick_sanity` 루프의 numba 이식(비트 동일).
+- `run_replay(cost_model=, liquidate_at_end=)`.
+
+측정 후 **하지 않은 것**: `backtest.panels`(재작성 이득 ≤25%, 3,000×2,500 기준 각 ~1s — swing-it 의 해법은
+반복 피벗을 `data.daily_panel` 한 번으로 바꾸는 것), `crosssectional._trailing_adv`(0.8s, nanmean 합 순서가
+배열 메모리 배치에 따라 달라 비트 동일 재현 비용이 큼), `paired_bootstrap`(0.4s)·`matched_control`(0.12s)
+— 이미 1초 미만.
 
 ## 추가 통계(소비 레포 수작업 대체)
 
 - `stats.matched_null.cluster_bootstrap_diff_ci(a, ca, b, cb)` — 두 표본 평균차, 날짜 공동 재추출
-  (daytrade-it `diff_ci`·`excess_vs_all_news`, scalp-it `tick_sanity.bootstrap_diff_ci`).
+  (daytrade-it `diff_ci` 와 같은 숫자; scalp-it `tick_sanity.bootstrap_diff_ci` 는 관측 i.i.d. 라 숫자가 다르다).
 
 ## 하지 않는 것
 

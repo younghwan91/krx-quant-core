@@ -224,7 +224,7 @@ def _select(spec: DatasetSpec, day: date, codes: Sequence[str] | None) -> str:
     lo = sql_literal(day)
     hi = sql_literal(day + timedelta(days=1))
     where = f"ts >= {lo} AND ts < {hi}"
-    if codes:
+    if codes is not None:
         where += f" AND code IN {code_list(sorted(set(codes)))}"
     return f"SELECT {cols} FROM {spec.table} WHERE {where} ORDER BY {', '.join(spec.order)}"
 
@@ -247,16 +247,22 @@ def _from_db(
     spec: DatasetSpec, day: date, codes: Sequence[str] | None, conn: Any
 ) -> dict[str, Any]:
     names = ("code", "ts", *spec.names)
-    # Postgres(COPY CSV)는 C 파서가 목표 자료형으로 바로 읽는다 — 결측·범위 초과면 파서가 실패한다
-    # (조용한 잘림 없음). 그 밖의 연결은 받은 뒤 :func:`_compact` 가 검사하며 줄인다.
+    # 정수열은 int64(실수열은 float64)로 받고 :func:`_compact` 가 범위를 검사하며 줄인다 — pandas C
+    # 파서에 int32·int8 을 바로 주면 범위 초과가 **조용히 wrap** 된다(3e9 → −1.29e9). 결측이면
+    # int64 파싱이 실패해 드러난다. 그 밖의 연결(sqlite)은 받은 값을 같은 검사로 줄인다.
     dtypes: dict[str, Any] = {"code": "category"}  # 행마다 파이썬 str 을 만들지 않는다
     if is_postgres(conn):
-        dtypes.update(dict(spec.columns))
+        dtypes.update(
+            {c: ("int64" if np.dtype(t).kind in "iu" else "float64") for c, t in spec.columns}
+        )
     df = fetch_frame(conn, _select(spec, day, codes), names, dtypes=dtypes, timestamps=("ts",))
     cat = df["code"].astype("category").cat
     code = np.asarray(cat.categories, dtype="<U6")[cat.codes.to_numpy()]
     del cat
-    ts = df["ts"].to_numpy("datetime64[s]")
+    ts_full = df["ts"].to_numpy("datetime64[us]")
+    ts = ts_full.astype("datetime64[s]")
+    if len(ts) and (ts_full != ts.astype("datetime64[us]")).any():
+        raise ValueError(f"{spec.name} {day}: sub-second timestamps — sec would truncate them")
     base = np.datetime64(day.isoformat(), "s")
     sec = (ts - base).astype(np.int64)
     if len(sec) and (sec.min() < 0 or sec.max() >= 86400):
@@ -291,6 +297,7 @@ def load_day(
     store: ColumnStore | bool | None = None,
     mmap: bool = True,
     today: date | None = None,
+    refresh: bool = False,
 ) -> CodeDay:
     """``spec`` 테이블의 하루. 닫힌 날이면 캐시(없으면 하루 전체를 한 번 받아 저장)에서 연다.
 
@@ -301,14 +308,25 @@ def load_day(
         store: ``None`` → 기본 :class:`ColumnStore`, ``False`` → 캐시 안 씀, 또는 직접 준 store.
         mmap: 캐시를 메모리 맵(읽기 전용)으로. ``False`` 면 힙으로 읽는다.
         today: 테스트용 "오늘"(KST).
+        refresh: 캐시가 있어도 DB 에서 다시 받아 교체(백필·재수집 뒤).
+
+    닫힌 날의 캐시는 그 뒤로 DB 를 다시 보지 않는다 — 하루가 백필되거나 재수집되면 ``refresh=True``.
+    행이 0 인 날은 캐시하지 않는다. ``codes=[]`` 는 빈 결과, ``codes="005930"`` 처럼 문자열 하나는
+    ``TypeError``(문자 단위로 돌아 조용히 빈 결과가 되는 걸 막는다).
     """
     if isinstance(day, datetime):
         day = day.date()
+    if codes is not None:
+        if isinstance(codes, str):
+            raise TypeError("codes must be a sequence of codes, not a str (wrap it: [code])")
+        codes = list(codes)
     want = tuple(columns) if columns is not None else spec.names
     bad = [c for c in want if c not in spec.names and c != "sec"]
     if bad:
         raise KeyError(f"{spec.name} has no columns {bad}")
     want = tuple(c for c in want if c != "sec")
+    if codes is not None and not codes:
+        return _wrap(spec, day, _empty(spec), want)
     cache: ColumnStore | None
     if store is False or not is_closed_day(day, today=today):
         cache = None
@@ -317,28 +335,47 @@ def load_day(
     else:
         cache = store
     key = day.isoformat()
+    full = ("codes", "ptr", "sec", *spec.names)
 
-    if cache is not None and cache.has(key, ("codes", "ptr", "sec", *spec.names)):
-        pass
-    else:
+    def fetch(sel: Sequence[str] | None) -> dict[str, Any]:
         own = conn is None
         c = connect() if own else conn
         try:
-            parts = _from_db(spec, day, None if cache is not None else codes, c)
+            return _from_db(spec, day, sel, c)
         finally:
             if own:
                 c.close()
-        if cache is None:
-            return _wrap(spec, day, parts, want)
-        _write_day(cache, key, parts)
-    parts = _read_day(cache, key, want, mmap=mmap)
-    out = _wrap(spec, day, parts, want)
+
+    if cache is None:
+        return _wrap(spec, day, fetch(codes), want)
+    if refresh or not cache.has(key, full):
+        # 잠근 채 다시 확인 — 같은 날을 여러 워커가 동시에 DB 에서 받지 않는다.
+        with cache.lock(key):
+            if refresh or not cache.has(key, full):
+                parts = fetch(None)
+                if len(parts["sec"]) == 0:
+                    # 빈 날(수집 누락·백필 전)은 캐시하지 않는다 — 나중에 채워지면 보이게.
+                    return _wrap(spec, day, parts, want)
+                _write_day(cache, key, parts)
+    out = _wrap(spec, day, _read_day(cache, key, want, mmap=mmap), want)
     return out.subset(codes) if codes is not None else out
+
+
+def _empty(spec: DatasetSpec) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "codes": np.zeros(0, "<U6"),
+        "ptr": np.zeros(1, np.int64),
+        "sec": np.zeros(0, np.int32),
+    }
+    out.update({c: np.zeros(0, t) for c, t in spec.columns})
+    return out
 
 
 def _write_day(cache: ColumnStore, key: str, parts: Mapping[str, Any]) -> None:
     rows = {k: v for k, v in parts.items() if k not in ("codes", "ptr")}
-    cache.write(key, rows, aux={"codes": parts["codes"], "ptr": parts["ptr"]})
+    cache.write(
+        key, rows, aux={"codes": parts["codes"], "ptr": parts["ptr"]}, replace=True, locked=True
+    )
 
 
 def _read_day(cache: ColumnStore, key: str, want: Sequence[str], *, mmap: bool) -> dict[str, Any]:

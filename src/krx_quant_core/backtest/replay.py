@@ -133,7 +133,9 @@ def _liquidate(book: PositionBook, events: list[Event]) -> list[Fill]:
         if code not in last:
             raise ValueError(f"liquidate_at_end: no price observed for held {code}")
         price, ts = last[code]
-        fill = Fill(ord_no="END", code=code, side="sell", qty=holding.qty, price=int(price), ts=ts)
+        fill = Fill(
+            ord_no="END", code=code, side="sell", qty=holding.qty, price=int(round(price)), ts=ts
+        )
         book.apply(fill)
         out.append(fill)
     return out
@@ -158,8 +160,10 @@ def run_replay(
             (슬리피지 0 — 체결가에 이미 들어 있다). daytrade-it 처럼 자기 비용 모델이 있으면
             넘긴다(전엔 체결을 두 번째 장부에 다시 적어야 했다).
         liquidate_at_end: 끝에 남은 보유를 종목별 **마지막 관측가**(봉 종가·체결가·매수1호가)로
-            장부에서 청산한다(``ord_no="END"`` 체결로 ``fills``·``trades`` 에 남는다). 주문·가드를
-            거치지 않는 회계상 청산이다.
+            장부에서 청산한다(``ord_no="END"`` 체결로 ``fills``·``trades`` 에 남는다). 주문·가드·
+            ``fill_basis`` 를 거치지 않는 회계상 청산이다 — 가격은 매수1호가가 아니라 마지막
+            체결가/종가일 수 있고(원 단위 반올림), 시각은 그 관측 시각이다(지연 체결보다
+            이를 수 있다).
     """
     engine: EngineCore | None = None
 
