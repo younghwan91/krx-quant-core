@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from krx_quant_core.costs.model import KoreanCostModel
 from krx_quant_core.execution.book import PositionBook
 from krx_quant_core.execution.engine import Bar, EngineCore, Event, Quote, Strategy, Trade
 from krx_quant_core.execution.events import Fill
@@ -118,6 +119,26 @@ def merge_events(
     return sorted(evs, key=lambda e: (e.ts, _KIND_ORDER[type(e)]))
 
 
+def _liquidate(book: PositionBook, events: list[Event]) -> list[Fill]:
+    last: dict[str, tuple[float, datetime]] = {}
+    for ev in events:
+        if isinstance(ev, Bar):
+            last[ev.code] = (ev.close, ev.ts)
+        elif isinstance(ev, Trade):
+            last[ev.code] = (ev.price, ev.ts)
+        elif isinstance(ev, Quote) and ev.bid > 0:
+            last[ev.code] = (ev.bid, ev.ts)
+    out: list[Fill] = []
+    for code, holding in book.positions().items():
+        if code not in last:
+            raise ValueError(f"liquidate_at_end: no price observed for held {code}")
+        price, ts = last[code]
+        fill = Fill(ord_no="END", code=code, side="sell", qty=holding.qty, price=int(price), ts=ts)
+        book.apply(fill)
+        out.append(fill)
+    return out
+
+
 def run_replay(
     strategy: Strategy,
     events: Iterable[Event],
@@ -127,8 +148,19 @@ def run_replay(
     fill_basis: FillBasis = "through",
     latency_sec: float = 0.0,
     market_of: Callable[[str], str] = lambda c: "KOSPI",
+    cost_model: KoreanCostModel | None = None,
+    liquidate_at_end: bool = False,
 ) -> ReplayResult:
-    """``events`` 를 순서대로 ``PaperBroker`` 위 엔진에 먹이고 결과를 모은다."""
+    """``events`` 를 순서대로 ``PaperBroker`` 위 엔진에 먹이고 결과를 모은다.
+
+    Args:
+        cost_model: 장부(:class:`PositionBook`)가 청산 때 뺄 비용 모델. 기본은 장부 기본값
+            (슬리피지 0 — 체결가에 이미 들어 있다). daytrade-it 처럼 자기 비용 모델이 있으면
+            넘긴다(전엔 체결을 두 번째 장부에 다시 적어야 했다).
+        liquidate_at_end: 끝에 남은 보유를 종목별 **마지막 관측가**(봉 종가·체결가·매수1호가)로
+            장부에서 청산한다(``ord_no="END"`` 체결로 ``fills``·``trades`` 에 남는다). 주문·가드를
+            거치지 않는 회계상 청산이다.
+    """
     engine: EngineCore | None = None
 
     def clock() -> datetime:
@@ -136,7 +168,7 @@ def run_replay(
 
     broker = PaperBroker(fill_basis=fill_basis, latency_sec=latency_sec)
     guard = OrderGuard(guard_config or _default_guard_config(), clock=clock)
-    book = PositionBook(market_of=market_of)
+    book = PositionBook(market_of=market_of, cost_model=cost_model)
     kill = KillSwitch(kill_config) if kill_config is not None else None
 
     # 이벤트를 먼저 목록으로 굳혀 첫 시각을 안다 — on_start 에서 낸 주문도 1970 시계가
@@ -158,6 +190,8 @@ def run_replay(
         for ev in events:
             fills.extend(engine.feed(ev))
         engine.end()
+        if liquidate_at_end:
+            fills.extend(_liquidate(book, events))
         rows: list[dict] = []
         if log_path.exists():
             with open(log_path, encoding="utf-8") as f:

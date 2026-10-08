@@ -265,3 +265,44 @@ def test_replay_fills_from_paper_orders_are_own_orders():
     res = run_replay(BuyThenSell(), _events())
     assert list(res.fills["side"]) == ["buy", "sell"]
     assert not [e for e in res.events if e.get("event") == "foreign_fill"]
+
+
+class BuyOnly:
+    def __init__(self) -> None:
+        self.done = False
+
+    def on_event(self, ev, ctx: StrategyContext) -> None:
+        if isinstance(ev, Quote) and not self.done:
+            ctx.oms.buy(ev.code, 2, int(ev.ask), ref_price=ev.ask)
+            self.done = True
+
+
+def test_cost_model_and_liquidate_at_end():
+    evs = [
+        Quote(T[0], CODE, 70_000, 70_100),
+        Quote(T[1], CODE, 70_000, 70_100),
+        Trade(T[2], CODE, 72_000, 5),
+    ]
+    plain = run_replay(BuyOnly(), evs)
+    assert len(plain.trades) == 0 and plain.book.positions()
+
+    cm = KoreanCostModel(CostModelConfig(commission_rate=Decimal("0.001")))
+    res = run_replay(BuyOnly(), evs, cost_model=cm, liquidate_at_end=True)
+    assert list(res.fills["ord_no"])[-1] == "END" and list(res.fills["price"]) == [70_100, 72_000]
+    assert not res.book.positions() and len(res.trades) == 1
+    sell = cm.cost_of_trade(Decimal(72_000), Decimal(2), "SELL", "KOSPI", T[2].date())
+    expected = 2 * (72_000 - 70_100) - float(cm.commission(Decimal(140_200))) - float(
+        sell.commission + sell.tax
+    )
+    assert res.trades["pnl"].iloc[0] == pytest.approx(expected)
+
+
+def test_liquidate_uses_quote_bid_when_no_bar_or_trade():
+    class Odd:
+        def on_event(self, ev, ctx):
+            if isinstance(ev, Bar) and ctx.oms.book.position("000660") is None:
+                ctx.oms.buy("000660", 1, 10_000, ref_price=10_000)
+
+    evs = [Bar(T[0], CODE, 1, 1, 1, 1, 1), Quote(T[1], "000660", 9_990, 10_000)]
+    res = run_replay(Odd(), evs, liquidate_at_end=True)  # 000660 호가가 있어 청산된다
+    assert not res.book.positions()

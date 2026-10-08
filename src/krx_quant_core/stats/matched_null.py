@@ -20,7 +20,13 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-__all__ = ["MatchedAlpha", "cluster_bootstrap_ci", "matched_alpha", "matched_control"]
+__all__ = [
+    "MatchedAlpha",
+    "cluster_bootstrap_ci",
+    "cluster_bootstrap_diff_ci",
+    "matched_alpha",
+    "matched_control",
+]
 
 
 def matched_control(
@@ -104,6 +110,50 @@ def cluster_bootstrap_ci(
     lo = (1.0 - ci) / 2.0 * 100.0
     hi = (1.0 + ci) / 2.0 * 100.0
     return (float(np.nanpercentile(means, lo)), float(np.nanpercentile(means, hi)), means)
+
+
+def cluster_bootstrap_diff_ci(
+    a: np.ndarray,
+    a_clusters: np.ndarray,
+    b: np.ndarray,
+    b_clusters: np.ndarray,
+    *,
+    n_boot: int = 2000,
+    seed: int = 0,
+    ci: float = 0.95,
+) -> tuple[float, float, float, np.ndarray]:
+    """두 표본 평균차 ``mean(a) − mean(b)`` — 클러스터(날짜)를 **같이** 재추출.
+
+    반환 ``(차, lo, hi, boot)``.
+
+    두 표본의 클러스터 합집합(문자열 정렬)에서 클러스터를 복원 추출하고, 뽑힌 클러스터들의 a 평균과
+    b 평균의 차를 낸다. 같은 날의 a·b 가 함께 움직이는 공통 충격이 차이에서 상쇄된다. daytrade-it
+    ``rr_entry_filter.diff_ci``·scalp-it ``tick_sanity.bootstrap_diff_ci`` 류의 손 루프를 대신한다
+    (``diff_ci`` 와는 같은 시드에서 같은 숫자). 어느 쪽이든 비면 NaN.
+    """
+    a = np.asarray(a, float)
+    b = np.asarray(b, float)
+    if a.size == 0 or b.size == 0:
+        return (np.nan, np.nan, np.nan, np.empty(0))
+    ca = np.asarray(a_clusters).astype(str)
+    cb = np.asarray(b_clusters).astype(str)
+    uniq = np.unique(np.concatenate([ca, cb]))
+    k = len(uniq)
+    ia = np.searchsorted(uniq, ca)
+    ib = np.searchsorted(uniq, cb)
+    sa = np.bincount(ia, weights=a, minlength=k)
+    na = np.bincount(ia, minlength=k).astype(float)
+    sb = np.bincount(ib, weights=b, minlength=k)
+    nb = np.bincount(ib, minlength=k).astype(float)
+    rng = np.random.default_rng(seed)
+    draw = rng.integers(0, k, size=(n_boot, k))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        boot = sa[draw].sum(1) / na[draw].sum(1) - sb[draw].sum(1) / nb[draw].sum(1)
+    # (1-0.95)/2*100 은 2.5000000000000022 — 손 루프들이 쓰는 2.5 와 같은 분위가 되게 반올림.
+    lo = round((1.0 - ci) / 2.0 * 100.0, 9)
+    hi = round((1.0 + ci) / 2.0 * 100.0, 9)
+    point = float(a.mean() - b.mean())
+    return (point, float(np.nanpercentile(boot, lo)), float(np.nanpercentile(boot, hi)), boot)
 
 
 @dataclass

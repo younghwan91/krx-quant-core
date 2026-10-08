@@ -26,7 +26,13 @@ from .fragility import (
     tail_removal,
     win_conditional,
 )
-from .matched_null import MatchedAlpha, cluster_bootstrap_ci, matched_alpha, matched_control
+from .matched_null import (
+    MatchedAlpha,
+    cluster_bootstrap_ci,
+    cluster_bootstrap_diff_ci,
+    matched_alpha,
+    matched_control,
+)
 from .metrics import (
     PPY,
     ann_sharpe,
@@ -62,6 +68,7 @@ __all__ = [
     "SelectionBiasReport",
     "argmax_first",
     "cluster_bootstrap_ci",
+    "cluster_bootstrap_diff_ci",
     "eligible_rows",
     "expected_max_of_m",
     "matched_alpha",
