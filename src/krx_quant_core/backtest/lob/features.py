@@ -23,6 +23,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ._jit import div, njit
+from ._window import forward_extreme
 from .ticks import TickTable, stock_tick_table, tick_of
 
 __all__ = [
@@ -290,22 +291,6 @@ class SecondFeatureStream:
         return self._out
 
 
-@njit
-def _fwd_max_shifted(a: NDArray[np.float64], h: int) -> NDArray[np.float64]:
-    """``out[t] = nanmax(a[t+2 .. t+1+h])`` — 원본 ``mfe`` 정렬(1초 지연 진입 뒤 h초)."""
-    n = a.shape[0]
-    out = np.full(n, np.nan)
-    for t in range(n - 1):
-        m = np.nan
-        hi = min(t + 1 + h, n - 1)
-        for s in range(t + 2, hi + 1):
-            v = a[s]
-            if v == v and (m != m or v > m):
-                m = v
-        out[t] = m
-    return out
-
-
 def forward_labels(
     bid: NDArray[np.float64],
     ask: NDArray[np.float64],
@@ -329,5 +314,6 @@ def forward_labels(
         if n - 1 - h > 0:
             exit_b[: n - 1 - h] = bb[1 + h :]
         out[f"net{h}"] = exit_b / ask_e - 1 - cost
-        out[f"mfe{h}"] = _fwd_max_shifted(bb, int(h)) / ask_e - 1 - cost
+        # 1초 지연 진입 뒤 h초: nanmax(bb[t+2 .. t+1+h]) — 원본 mfe 정렬
+        out[f"mfe{h}"] = forward_extreme(bb, 2, int(h), largest=True) / ask_e - 1 - cost
     return out
