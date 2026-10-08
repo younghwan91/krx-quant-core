@@ -186,3 +186,31 @@ def test_shift_ticks_rejects_invalid_price_and_underflow():
         shift_ticks(2003, 1)
     with pytest.raises(ValueError):
         shift_ticks(1, -1)
+
+
+def test_fast_tick_size_int_matches_decimal_canon_densely():
+    import numpy as np
+    from kiwoom_client.tick_size import tick_size as canon
+
+    from krx_quant_core.market.ticks import tick_size_array
+
+    rng = np.random.default_rng(0)
+    edges = [2000, 5000, 20000, 50000, 200000, 500000]
+    probes = [p + d for p in edges for d in (-1, -0.5, -1e-9, 0, 1e-9, 0.5, 1)]
+    probes += list(rng.uniform(0.01, 3_000_000, 5000)) + [1, 1.5, 999_999_999]
+    for p in probes:
+        assert tick_size_int(p) == int(canon(p)), p
+    arr = tick_size_array(probes)
+    assert arr.tolist() == [float(canon(p)) for p in probes]
+    out = tick_size_array([0, -5, float("nan"), 1999, 2000])
+    assert np.isnan(out[:3]).all() and out[3:].tolist() == [1.0, 5.0]
+    assert tick_size_array([1999, 2000, 30000], etf=True).tolist() == [1.0, 5.0, 5.0]
+
+
+def test_tick_size_int_nan_keeps_canonical_exception():
+    import decimal
+
+    import pytest
+
+    with pytest.raises((decimal.InvalidOperation, ValueError)):
+        tick_size_int(float("nan"))

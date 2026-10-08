@@ -80,3 +80,39 @@ def test_matched_alpha_empty_controls():
     c = M.matched_control(sig.assign(date=-1), pool, strata=["date"])
     a = M.matched_alpha(sig, pool, c, value="ret")
     assert np.isnan(a.alpha) and a.n_trades == 0 and a.n_unmatched == len(sig)
+
+
+def _orig_diff_ci(a, b, seed=7, n_boot=500):
+    """daytrade-it scripts/eval/rr_entry_filter.py::diff_ci 원본(점추정·CI 부분)."""
+    days = sorted(set(a["day"].astype(str)) | set(b["day"].astype(str)))
+    idx = {d: i for i, d in enumerate(days)}
+    k = len(days)
+
+    def sums(t):
+        i = t["day"].astype(str).map(idx).to_numpy()
+        return (np.bincount(i, weights=t["net_bp"].to_numpy(), minlength=k),
+                np.bincount(i, minlength=k).astype(float))  # fmt: skip
+
+    sa, na = sums(a)
+    sb, nb = sums(b)
+    rng = np.random.default_rng(seed)
+    draw = rng.integers(0, k, size=(n_boot, k))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        boot = sa[draw].sum(1) / na[draw].sum(1) - sb[draw].sum(1) / nb[draw].sum(1)
+    point = a["net_bp"].mean() - b["net_bp"].mean()
+    return point, np.nanpercentile(boot, 2.5), np.nanpercentile(boot, 97.5)
+
+
+def test_cluster_bootstrap_diff_ci_matches_daytrade_diff_ci():
+    from krx_quant_core.stats import cluster_bootstrap_diff_ci
+
+    rng = np.random.default_rng(3)
+    days = pd.date_range("2026-01-01", periods=40).date
+    a = pd.DataFrame({"day": rng.choice(days[:30], 300), "net_bp": rng.normal(5, 40, 300)})
+    b = pd.DataFrame({"day": rng.choice(days[10:], 500), "net_bp": rng.normal(0, 40, 500)})
+    want = _orig_diff_ci(a, b)
+    got = cluster_bootstrap_diff_ci(
+        a["net_bp"], a["day"], b["net_bp"], b["day"], n_boot=500, seed=7
+    )
+    assert got[:3] == want
+    assert np.isnan(cluster_bootstrap_diff_ci([], [], [1.0], ["d"])[0])

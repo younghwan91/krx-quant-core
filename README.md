@@ -28,12 +28,13 @@ Deflated Sharpe·purged CV 검증 통계를 한 패키지로 묶었다.
 ## 설치
 
 ```bash
-pip install krx-quant-core==0.6.2
-# 초 격자 호가 리플레이(backtest.lob)를 numba 로 가속하려면 extra 로: "krx-quant-core[fast]==0.6.2"
-# optuna 스윕(research.optuna_search)까지 쓰려면: "krx-quant-core[fast,opt]==0.6.2"
+pip install krx-quant-core==0.7.0
+# 초 격자 호가 리플레이(backtest.lob)를 numba 로 가속하려면 extra 로: "krx-quant-core[fast]==0.7.0"
+# optuna 스윕(research.optuna_search)까지 쓰려면: "krx-quant-core[fast,opt]==0.7.0"
+# 데이터 층(data.*)을 Postgres 에서 읽으려면: "krx-quant-core[db]==0.7.0" (psycopg2 가 깔려 있으면 그것도 된다)
 
 # PyPI 릴리스 전(또는 태그 고정 개발 중)에는 git 태그로:
-pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.6.2"
+pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.7.0"
 ```
 
 Python ≥ 3.11. 의존성은 `kiwoom-client`(호가단위 표의 정본), `numpy`, `pandas` 뿐이다.
@@ -43,7 +44,8 @@ Python ≥ 3.11. 의존성은 `kiwoom-client`(호가단위 표의 정본), `nump
 
 ```
 krx_quant_core/
-├── market/     종목코드·Market, 호가단위, 상/하한가, KST 세션, 거래일 달력
+├── data/       공용 DB 읽기(COPY)·열 단위 mmap 캐시 — 하루치 틱·호가·분봉 CSR, 연도별 일봉·패널, 거래일 달력
+├── market/     종목코드·Market, 호가단위(스칼라·벡터·ETF), 상/하한가, KST 세션, 거래일 달력
 ├── costs/      일자별 거래세 스케줄, KoreanCostModel(Decimal), round_trip_cost(float)
 ├── execution/  주문 관리 계층 — OrderManager·InstanceLock(oms.py), PositionBook(book.py),
 │               Broker 프로토콜·PaperBroker·KiwoomBroker, EngineCore(같은 전략, 실매매/리플레이),
@@ -51,7 +53,8 @@ krx_quant_core/
 ├── risk/       DART 중대공시 분류·RiskGate, DartDisclosureDB, KillSwitch
 ├── backtest/   호가 스윕 VWAP·왕복비용, 지정가 체결 규칙, 트레이드 원장 지표, 횡단면 시뮬,
 │               replay.py(run_replay — EngineCore+PaperBroker 로 과거 이벤트 리플레이),
-│               drift.py(일중·야간 수익 분해 — 이 유니버스의 일중은 구조적으로 음수인가)
+│               drift.py(일중·야간 수익 분해 — 이 유니버스의 일중은 구조적으로 음수인가),
+│               ticktime.py(불규칙 틱시각 직전·미래 창 — numba)
 │   └── lob/    틱·호가 → 초 격자 특징·경로, 배치=실시간 공용 커널, 에피소드 시뮬, 무작위 대조군, 지정가 대기열 모델,
 │               ceiling.py(오라클 천장 — 완벽한 예지력으로도 비용을 넘는가)
 ├── research/   run_sweep(격자·병렬·캐시), optuna_search(TPE, extra `opt`) — 둘 다 모든
@@ -371,6 +374,46 @@ a.alpha, a.ci_low, a.ci_high, a.by_stratum                              # 사전
 95·98 은 원본 스크립트와 **비트 단위로 같다**(골든 테스트가 원본 복사본을 대조). `through_fill_second` 는
 numba 커널이고 폴백도 같은 숫자다. `cost` 는 필수 인자 — 원본의 `COST = 0.0023` 상수를 박지 않았다.
 
+## 데이터 층 (v0.7) — 한 번 읽고, 열 단위로 mmap
+
+세 레포가 같은 DB(`KR_QUANT_DB`)를 각자 읽었다: scalp-it 은 하루치 틱·호가 로더 9벌과 날짜별 피클 캐시
+17벌(`~/of80` 17GB), daytrade-it 은 분봉을 매 실행 다시 쿼리, swing-it 은 `daily_bars_adjusted` 580만 행을
+매번 `SELECT *`. `data` 는 Postgres 를 `COPY … TO STDOUT (FORMAT csv)` 로 읽어 열마다 `.npy` 로 저장하고
+다음부터 `mmap` 으로 연다 — 필요한 열만 디스크에서 올라오고, 16 워커가 같은 날을 읽어도 페이지 캐시 한 벌이다.
+캐시 위치 `$KQC_DATA`(기본 `~/.kqc/data`). **옵트인**이라 기존 어댑터는 그대로 돈다.
+
+```python
+from datetime import date
+from krx_quant_core import data as D
+from krx_quant_core.backtest.lob import build_second_grid
+
+tk = D.load_ticks(date(2026, 10, 7))                 # 종목별 CSR: tk.codes, tk.ptr, tk.cols["price"] (int32)
+qs = D.load_quotes(date(2026, 10, 7), levels=3)      # 캐시는 10단계 전체, 읽는 건 3단계만
+feat, path = build_second_grid(tk.frame("005930"), qs.frame("005930"))   # read_sql 경로와 비트 동일
+mb = D.load_minute_bars(date(2026, 10, 7))           # sec = 분 시작 초
+bars = D.load_daily_bars("2016-01-01", "2026-10-08")  # 연도별 캐시 + 지문 — 바뀐 해만 다시 받는다
+panel = D.daily_panel(bars, ["close", "trade_value"], dtype="float32")
+panel.array("close")                                 # code × date (crosssectional 입력 방향)
+panel.frame("close", orient="date_x_code")           # orient 는 필수 — .T 빠뜨리는 버그 방지
+cal = D.trading_calendar()                           # daily_bars 날짜, KST 하루 한 번 DB
+```
+
+simnode 실측(2026-10-07 하루, 콜드 → 웜): 틱 190만 행 5.4s → **1ms**, 호가 90만 행 9.0s → **2ms**,
+분봉 56만 행 2.6s → 2ms, 일봉 10년 580만 행 16s → 1.1s(지문 쿼리 포함), 패널 0.35s, 달력 0.74s → 1ms.
+틱 하루 메모리 `read_sql` 223MB → 84MB. 장중 데이터는 **닫힌 날**(KST 오늘 이전)만 캐시하고 오늘은 매번 DB.
+`frame()` 은 정수열을 int64 로 올려 `read_sql` 과 같은 의미다 — 배열(`get()`)을 직접 곱할 땐 먼저
+`astype(np.int64)`(int32 × int32 는 넘친다).
+
+같은 판에 들어간 가속(전부 **값 동일** — 원본·정본 대조 테스트):
+
+| 무엇 | 전 → 후 |
+|---|---|
+| `lob.ceiling_table`·`forward_labels` 미래 창 극값 (O(n·h) → 단조 덱 O(n)) | 3종목-일 2.23s → 0.058s, h=7200 0.19s → 0.0006s |
+| `market.ticks.tick_size_int` (Decimal → float 밴드 이분탐색) · `tick_size_array`·ETF 표 신설 | 0.44 → 0.07µs/호출 |
+| `backtest.ticktime.trailing_sums`·`forward_max_last` (scalp-it `tick_sanity` 루프 이식) | 13만 틱 21×·119× |
+| `run_replay(cost_model=, liquidate_at_end=)` | daytrade-it 이중 장부 우회 제거 |
+| `stats.cluster_bootstrap_diff_ci` | daytrade-it `diff_ci` 와 같은 숫자, 손 루프 대체 |
+
 ## 설계 원칙
 
 1. **이식은 수치 동일.** 소비 레포가 실매매일에 갈아탈 수 있어야 한다. 포트마다 원본
@@ -417,7 +460,7 @@ numba 커널이고 폴백도 같은 숫자다. `cost` 는 필수 인자 — 원�
 ```bash
 uv sync --extra dev
 uv sync --extra dev --extra fast   # numba 경로까지
-uv run pytest -q        # 656 tests (extra fast·opt 포함)
+uv run pytest -q        # 800+ tests (extra fast·opt 포함)
 uv run ruff check src tests
 ```
 
@@ -425,6 +468,12 @@ uv run ruff check src tests
 
 ## 로드맵
 
+- **v0.7** 로 데이터 층(`data`)과 가속이 들어갔다. 소비 레포 채택 순서 제안: scalp-it 하루치 로더 9벌·
+  피클 캐시 → `load_ticks`/`load_quotes`, `select distinct ts::date` → `trading_calendar`, `tick_sanity` 루프
+  → `backtest.ticktime`; daytrade-it 분봉 쿼리 → `load_minute_bars`, `handlers/backtest.py` 이중 장부 →
+  `run_replay(cost_model=, liquidate_at_end=True)`, `diff_ci` → `cluster_bootstrap_diff_ci`; swing-it
+  `read_prices`·반복 피벗 → `load_daily_bars` + `daily_panel`. 다음: 수집기 COPY 쓰기 경로, 실시간
+  `TimeWindow`(pair_detector 창 합), `price_adjust` 의 코어 이전 — 셋 다 실매매·운영 경로라 패리티 근거와 함께.
 - **v0.6** 로 판정 축(`backtest.lob.ceiling`·`stats.selection`·`backtest.drift`·`stats.matched_null`)과
   `kqc nightly status`·`kqc pins` 가 들어갔다. 다음 순서: scalp-it 100번(분봉 275일 탐색)이 3·4 를 쓰게 →
   엔진 A 마무리(두 데몬의 킬·장부를 `OrderManager` 로, 실주문이 멈춘 지금이 교체 비용이 가장 싸다) →

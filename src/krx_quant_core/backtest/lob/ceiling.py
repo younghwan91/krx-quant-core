@@ -24,9 +24,9 @@ from collections.abc import Sequence
 
 import numpy as np
 import pandas as pd
-from numpy.lib.stride_tricks import sliding_window_view
 
 from ._jit import njit
+from ._window import forward_extreme
 
 __all__ = [
     "DEFAULT_HORIZONS",
@@ -43,15 +43,8 @@ DEFAULT_HORIZONS: tuple[int, ...] = (10, 30, 60, 300, 600, 1800, 3600, 7200)
 
 
 def _future_extreme(x: np.ndarray, h: int, *, largest: bool) -> np.ndarray:
-    """out[t] = max/min(x[t+2 : t+2+h]) — 원본과 같은 순서로 fmax/fmin 누적(NaN 무시)."""
-    n = len(x)
-    best = np.full(n, np.nan, np.float64)
-    op = np.fmax if largest else np.fmin
-    for j in range(2, h + 2):
-        s = np.full(n, np.nan)
-        s[: n - j] = x[j:]
-        best = op(best, s)
-    return best
+    """out[t] = max/min(x[t+2 : t+2+h]) (NaN 무시) — 원본 fmax/fmin h겹 누적과 같은 값, O(n)."""
+    return forward_extreme(x, 2, h, largest=largest)
 
 
 def oracle_long(
@@ -125,10 +118,10 @@ def window_max(x: np.ndarray, h: int) -> np.ndarray:
     """``w[i] = nanmax(x[i : i+h])`` — 뒤가 모자라면 NaN."""
     x = np.asarray(x, np.float64)
     n = len(x)
-    out = np.full(n, np.nan)
-    if n > h:
-        with np.errstate(all="ignore"):
-            out[: n - h + 1] = np.nanmax(sliding_window_view(x, h), axis=1)
+    if n <= h:
+        return np.full(n, np.nan)
+    out = forward_extreme(x, 0, h, largest=True)
+    out[n - h + 1 :] = np.nan
     return out
 
 
