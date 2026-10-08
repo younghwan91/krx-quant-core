@@ -66,7 +66,7 @@ from .sim import (
     SimResult,
     simulate_exits,
 )
-from .ticks import TickTable, stock_tick_table
+from .ticks import TickTable, etf_tick_table, stock_tick_table
 
 __all__ = [
     "DEFAULT_HORIZONS",
@@ -113,6 +113,7 @@ __all__ = [
     "build_second_grid",
     "compute_features",
     "compute_features_v2",
+    "etf_tick_table",
     "cross_section_ranks_v2",
     "forward_labels",
     "new_state_v2",

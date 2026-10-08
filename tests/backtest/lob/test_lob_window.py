@@ -1,4 +1,4 @@
-"""backtest.lob._window — 단조 덱 미래 창 극값이 무식한 nanmax/nanmin 과 같은지(nan·짧은 배열·긴 창)."""
+"""backtest.lob._window — 단조 덱 미래 창 극값이 무식한 nanmax/nanmin 과 같은지(nan·긴 창)."""
 
 from __future__ import annotations
 

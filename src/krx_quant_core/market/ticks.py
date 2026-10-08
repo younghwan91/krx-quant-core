@@ -17,17 +17,25 @@ kiwoom-client 로 모았다(2026-09-12). 이 모듈은 그 위의 파생 연산�
 
 from __future__ import annotations
 
+import bisect
+import importlib
+import math
 from decimal import ROUND_CEILING, Decimal
+from typing import Any
 
+import numpy as np
 from kiwoom_client.tick_size import round_to_tick, tick_size, ticks_in
+from numpy.typing import NDArray
 
 __all__ = [
+    "ETF_TICK_BANDS",
     "KRX_LOT_SIZE",
     "is_tick_valid",
     "round_to_tick",
     "round_to_tick_up",
     "shift_ticks",
     "tick_size",
+    "tick_size_array",
     "tick_size_int",
     "ticks_in",
     "ticks_in_float",
@@ -38,6 +46,31 @@ __all__ = [
 KRX_LOT_SIZE = 1
 
 _Num = Decimal | int | float
+
+
+def _load_bands() -> tuple[tuple[float, ...], tuple[int, ...]]:
+    """정본 밴드 표를 float 경계·int 틱으로 옮기고 경계 양쪽을 정본 함수와 대조한다.
+
+    정본 표가 바뀌면 여기가 조용히 어긋나지 않고 import 가 실패한다(``lob.ticks`` 와 같은 방식).
+    """
+    mod = importlib.import_module("kiwoom_client.tick_size")
+    bounds = tuple(float(b) for b, _ in mod._TICK_BANDS)
+    ticks = (*(int(t) for _, t in mod._TICK_BANDS), int(mod._TOP_TICK))
+    for b in bounds:
+        for p in (b - 1.0, b - 0.5, b, b + 0.5):
+            i = bisect.bisect_right(bounds, p)
+            if ticks[i] != int(tick_size(p)):
+                raise RuntimeError(f"tick table drifted from kiwoom_client at price {p}")
+    return bounds, ticks
+
+
+#: 주식 밴드(정본에서 읽음): ``price < _BOUNDS[i]`` 인 첫 ``i`` 의 ``_TICKS[i]``,
+#: 어느 경계도 아니면 ``_TICKS[-1]``.
+_BOUNDS, _TICKS = _load_bands()
+
+#: ETF·ETN 호가단위 — 2,000원 미만 1원, 이상 5원.
+#: kiwoom-client 정본에 아직 없다(``lob.ticks`` 참고).
+ETF_TICK_BANDS: tuple[tuple[float, ...], tuple[int, ...]] = ((2000.0,), (1, 5))
 
 
 def round_to_tick_up(price: _Num) -> Decimal:
@@ -93,10 +126,28 @@ def tick_size_int(price: float) -> int:
     ``price <= 0`` 이면 ``kiwoom_client`` 처럼 ``ValueError`` 를 던지지 않고 **조용히
     1** 을 돌려준다 — scalp-it 실시간 경로에 초기화 전 price=0 을 거르지 않는
     호출부가 있을 수 있어서, 그 동작을 그대로 보존한다.
+
+    유한한 양수는 float 밴드 표를 이분 탐색한다(호출마다 ``Decimal`` 을 만들지 않는다 — 실시간
+    틱마다 불린다). nan·inf 는 예전처럼 정본 함수로 보내 같은 예외를 낸다.
     """
     if price <= 0:
         return 1
-    return int(tick_size(price))
+    if not math.isfinite(price):
+        return int(tick_size(price))
+    return _TICKS[bisect.bisect_right(_BOUNDS, price)]
+
+
+def tick_size_array(prices: Any, *, etf: bool = False) -> NDArray[np.float64]:
+    """벡터 호가단위(float). 0 이하·nan 은 nan. ``etf`` 면 :data:`ETF_TICK_BANDS`.
+
+    배열 경로(연구 스크립트의 ``[TICK(x) for x in ask]``)를 대신한다. 값은 :func:`tick_size_int`
+    와 같다(테스트가 밴드 경계마다 대조).
+    """
+    p = np.asarray(prices, dtype=np.float64)
+    bounds, ticks = ETF_TICK_BANDS if etf else (_BOUNDS, _TICKS)
+    out = np.asarray(ticks, np.float64)[np.searchsorted(np.asarray(bounds), p, side="right")]
+    out[~(p > 0)] = np.nan
+    return out
 
 
 def ticks_in_float(width: float, price: float) -> float:

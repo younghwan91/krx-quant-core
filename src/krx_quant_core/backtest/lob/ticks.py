@@ -5,7 +5,7 @@
 정본이 바뀌면 여기가 조용히 어긋나지 않고 import 가 실패한다.
 
 ETF 호가단위(2,000원 미만 1원·이상 5원)는 kiwoom-client 0.4.0 에 **없다**. 정본에 추가를
-요청해 두었고, 그 전까지 ETF 를 돌리는 호출부는 :class:`TickTable` 을 직접 만들어 넘긴다.
+요청해 두었고, 그 전까지는 :func:`etf_tick_table` (``market.ticks.ETF_TICK_BANDS``)을 쓴다.
 """
 
 from __future__ import annotations
@@ -16,11 +16,11 @@ from dataclasses import dataclass
 import numpy as np
 from numpy.typing import NDArray
 
-from krx_quant_core.market.ticks import tick_size
+from krx_quant_core.market.ticks import ETF_TICK_BANDS, tick_size
 
 from ._jit import njit
 
-__all__ = ["TickTable", "stock_tick_table", "tick_of"]
+__all__ = ["TickTable", "etf_tick_table", "stock_tick_table", "tick_of"]
 
 
 @dataclass(frozen=True)
@@ -81,3 +81,15 @@ _STOCK = _load_stock_table()
 def stock_tick_table() -> TickTable:
     """KOSPI·KOSDAQ 주식 호가단위(kiwoom-client 정본)."""
     return _STOCK
+
+
+_ETF = TickTable(
+    bounds=np.array(ETF_TICK_BANDS[0], np.float64),
+    ticks=np.array(ETF_TICK_BANDS[1][:-1], np.float64),
+    top=float(ETF_TICK_BANDS[1][-1]),
+)
+
+
+def etf_tick_table() -> TickTable:
+    """ETF·ETN 호가단위(2,000원 미만 1원, 이상 5원) — ``simulate_exits(tick_table=...)`` 등에."""
+    return _ETF
