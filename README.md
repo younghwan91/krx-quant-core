@@ -28,13 +28,14 @@ Deflated Sharpe·purged CV 검증 통계를 한 패키지로 묶었다.
 ## 설치
 
 ```bash
-pip install krx-quant-core==0.7.0
-# 초 격자 호가 리플레이(backtest.lob)를 numba 로 가속하려면 extra 로: "krx-quant-core[fast]==0.7.0"
-# optuna 스윕(research.optuna_search)까지 쓰려면: "krx-quant-core[fast,opt]==0.7.0"
-# 데이터 층(data.*)을 Postgres 에서 읽으려면: "krx-quant-core[db]==0.7.0" (psycopg2 가 깔려 있으면 그것도 된다)
+pip install krx-quant-core==0.8.0
+# 초 격자 호가 리플레이(backtest.lob)를 numba 로 가속하려면 extra 로: "krx-quant-core[fast]==0.8.0"
+# optuna 스윕(research.optuna_search)까지 쓰려면: "krx-quant-core[fast,opt]==0.8.0"
+# 데이터 층(data.*)을 Postgres 에서 읽으려면: "krx-quant-core[db]==0.8.0" (psycopg2 가 깔려 있으면 그것도 된다)
+# 진화 엔진(research.evolve) 최적화기까지: "krx-quant-core[fast,evo]==0.8.0"
 
 # PyPI 릴리스 전(또는 태그 고정 개발 중)에는 git 태그로:
-pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.7.0"
+pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.8.0"
 ```
 
 Python ≥ 3.11. 의존성은 `kiwoom-client`(호가단위 표의 정본), `numpy`, `pandas` 뿐이다.
@@ -58,7 +59,8 @@ krx_quant_core/
 │   └── lob/    틱·호가 → 초 격자 특징·경로, 배치=실시간 공용 커널, 에피소드 시뮬, 무작위 대조군, 지정가 대기열 모델,
 │               ceiling.py(오라클 천장 — 완벽한 예지력으로도 비용을 넘는가)
 ├── research/   run_sweep(격자·병렬·캐시), optuna_search(TPE, extra `opt`) — 둘 다 모든
-│               config 를 시행 원장에 적는다
+│               config 를 시행 원장에 적는다; evolve(탐색 공간·BIPOP CMAwM/CatCMAwM·세대 프로토콜·
+│               짝 레이싱·봉인·풀·적합도 커널, extra `evo`)
 ├── stats/      Deflated/Probabilistic Sharpe, t-haircut, purged walk-forward, 부트스트랩, 취약성,
 │               selection.py(후보 선택편향 — 검증 최대를 고른 값이 실력 없이 얼마나 오르나),
 │               matched_null.py(층 매칭 대조 + 날짜 클러스터 부트스트랩)
@@ -414,6 +416,54 @@ simnode 실측(2026-10-07 하루, 콜드 → 웜): 틱 190만 행 5.4s → **1ms
 | `run_replay(cost_model=, liquidate_at_end=)` | daytrade-it 이중 장부 우회 제거 |
 | `stats.cluster_bootstrap_diff_ci` | daytrade-it `diff_ci` 와 같은 숫자, 손 루프 대체 |
 
+## 진화 엔진 (v0.8) — `research.evolve`
+
+swing-it 패턴 GA 메타 진화(세대마다 후보 메뉴 → 폴드 1~4 실제 GA → 봉인 구간은 마지막 한 번)를 일반화했다.
+전략(표현형 `canonical`·적합도)은 소비 레포 콜백이고, 코어는 계산 기계와 절차를 낸다.
+`pip install "krx-quant-core[evo]"`(cmaes 0.13.1) — 커널은 `[fast]`(numba) 선택.
+
+| 모듈 | 내용 |
+|---|---|
+| `space` | `Real`·`Choice`·`Ordinal` → swing-it 과 같은 배치(`[연속][로짓][순서형]`), `decode`(파이썬 `round` — `np.round` 와 동점에서 다르다), 같은 값 수준 접기, int64 키, `override(PATTERN_GA_MENU)`(`optional` 유전자는 이름이 있을 때만), `random`(`random_x` 와 같은 난수 순서) |
+| `optim` | `bipop(evaluate, space, budget=, seed=, x0=, x_restart=, backend=)` — swing-it `cma_bipop_x0` 과 같은 재시작 규칙·난수 순서, **배치 평가**(세대마다 memo 에 없는 표현형만). 백엔드 `cmawm`(`FastCMAwM` — 라이브러리와 비트 동일 궤적), `catcmawm`(CatCMAwM, 범주형을 분포로), `cmawm_lib`(대조). `keyfn=` 으로 소비자 자기 decode·키를 그대로 쓸 수 있다 |
+| `protocol` | `EvoLedger`(결과 전 등록 → 결과, 미완도 DSR N), `distinguish`(swing-it 잡음 규칙), `race`(같은 시드 집합 짝 차이 SE 레이싱 — 편향 공개 문구 포함), `Seal`·`SealBreach`, `digest`, `provenance` |
+| `pool` | `EvoPool` — spawn, 자식 스레드 1개, **과제 순서 집계** |
+| `kernels` | `monthly_block_lower`(월 합 → 이동 블록 부트스트랩 → `np.percentile` 을 비트 동일하게 한 번에), `block_boot`, `h32`, `percentile_linear` |
+
+```python
+from krx_quant_core.research.evolve import Space, Real, Choice, Ordinal, bipop, race, EvoLedger
+
+space = Space([Real("rs_min", 0.0, 90.0, off="lo"), Choice("entry", ("bottom", "horiz", "trend")),
+               Ordinal("theta", (0.06, 0.08, 0.10)),
+               Ordinal("exit_safe", (0, 1), optional=True)]).override(menu)
+
+def evaluate(G):                       # memo 에 없는 표현형만, 처음 나온 순서로 온다
+    return fits, n_trades              # (값[최대화], 진입 수) — 진입 수로 zero_frac 을 센다
+
+res = bipop(evaluate, space, budget=10_000, seed=0, x0=x0, x_restart=pool, canonical=canon)
+res.best_payload, res.best_value, res.uniq, res.restarts, res.top(5)
+```
+
+**실데이터 대조**(simnode, 2026-10-11, swing-it FWM 엔진 + 3세대 G3A 메뉴, 63차원): swing-it
+`ga_run_one` 과 코어 `bipop`(`keyfn` = swing-it `decode`·`gkey`)이 폴드 1·3, 시드 0·1·5·100, 예산
+6,000~10,000 에서 최적 config repr·적합도·진입 수·uniq·ghash 집합·곡선·상위 5·재시작 기록까지 **전부
+같다**(두 백엔드 모두). 적합도 꼬리(월 합·블록 부트스트랩·백분위)는 실제 포트폴리오 1,622개에서 비트 동일.
+
+| 층 | 전 → 후 (ms/평가, 작업자 1개) |
+|---|---|
+| CMAwM `ask`/`tell` (63차원) | 0.24 → 0.10 (조용할 때) · 0.45 → 0.20 (3세대 12 작업자와 동시) |
+| 적합도 꼬리 `monthly → block_boot → percentile` | 0.33 → 0.11 |
+| 나머지 = swing-it 평가 접착 `candidates`·`run` | 1.0 (그대로 — 전략 코드, swing-it 몫) |
+
+끝까지 가속하려면 swing-it 쪽 순서: ① `ga_fast._jit` 을 `cache=True`(작업자마다 후보 실행마다 약 9초 JIT)
+② 코어 `bipop` + `kernels.monthly_block_lower` 로 교체(위 대조로 바이트 동일) ③ `candidates`·`run` 의 배열
+복사·`astype`·`concatenate` 를 njit 한 번 호출로 — 평가 하나가 커널 시간(수십 µs)에 가까워진다.
+
+**세대 판정.** swing-it 잡음 규칙(평균 차 > 큰 sd × 2)은 sd 가 시드 집합 수로 줄지 않아 집합을 늘려도
+검정력이 안 는다(2세대 G1C ±1.03%p 면 2.06%p 미만 차이는 영원히 구분 불가). `race` 는 모든 후보가 같은
+시드 집합을 돌리는 점을 써서 짝 차이의 SE(√n 으로 준다)로 가른다 — `k`·`min_sets`·`max_sets`·시드 순서는
+결과 전에 등록하고, 살아남은 후보 평균의 승자의 저주는 봉인 구간에서만 판정해 피한다.
+
 ## 설계 원칙
 
 1. **이식은 수치 동일.** 소비 레포가 실매매일에 갈아탈 수 있어야 한다. 포트마다 원본
@@ -468,6 +518,8 @@ uv run ruff check src tests
 
 ## 로드맵
 
+- **v0.8** 로 진화 엔진(`research.evolve`)이 들어갔다. swing-it 채택 순서는 위 "진화 엔진" 끝. 다음:
+  CatCMAwM vs CMAwM 같은 예산 비교(swing-it 사전등록), 평가 접착 njit 화 뒤 재측정.
 - **v0.7** 로 데이터 층(`data`)과 가속이 들어갔다. 소비 레포 채택 순서 제안: scalp-it 하루치 로더 9벌·
   피클 캐시 → `load_ticks`/`load_quotes`, `select distinct ts::date` → `trading_calendar`, `tick_sanity` 루프
   → `backtest.ticktime`; daytrade-it 분봉 쿼리 → `load_minute_bars`, `handlers/backtest.py` 이중 장부 →
