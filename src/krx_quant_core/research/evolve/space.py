@@ -1,23 +1,22 @@
 """탐색 공간 — 연속(Real)·범주형(Choice)·순서형(Ordinal) 유전자의 부호화·복호화·키.
 
-swing-it ``pattern_ga_run.py`` 의 ``CONT``·``NOM``·``DISC`` +
-``decode``·``encode``·``random_x``·메뉴
-덮어쓰기(``PATTERN_GA_MENU``)를 일반화했다.
+swing-it ``pattern_ga_run.py`` 의 ``CONT``·``NOM``·``DISC`` + ``decode``·``encode``·``random_x``·
+메뉴 덮어쓰기(``PATTERN_GA_MENU``)를 일반화했다.
 
 **배치(legacy layout)** — 선언 순서와 무관하게 ``[Real…][Choice 로짓…][Ordinal 단계…]``. 각 묶음
-안은 선언 순서. 최적화기(CMAwM)는 이 벡터를 본다: Real ∈ [0, 1], Choice 는 수준마다 로짓 ∈ [0,
-1](argmax, 동률 = 앞), Ordinal 은 수준 번호 ∈ [0, k−1](정수 축).
+안은 선언 순서. 최적화기(CMAwM)는 이 벡터를 본다: Real ∈ [0, 1], Choice 는 수준마다 로짓
+∈ [0, 1](argmax, 동률 = 앞), Ordinal 은 수준 번호 ∈ [0, k−1](정수 축).
 
 **유전자 행렬 G** — ``decode(X)`` 는 ``(n, n_genes)`` float64 를 낸다(열 = 켜진 유전자, 선언 순서).
 
 - Real: 실제 값 ``round(lo + u·(hi−lo), digits)`` (파이썬 ``round`` — 정확한 십진 반올림,
-  ``np.round`` 와 동점에서 다르다). 끔 끝(``off="lo"``/``"hi"``)에서 ``off_zone`` 안이면 NaN(=
-  끔/``None``).
+  ``np.round`` 와 동점에서 다르다). 끔 끝(``off="lo"``/``"hi"``)에서 ``off_zone`` 안이면
+  NaN(= 끔/``None``).
 - Choice·Ordinal: **어휘 코드**. 어휘 = 수준 + ``extra`` (같은 값은 한 코드로 접는다 — 한 수준
   덮어쓰기 복제 ``(v, v)`` 가 같은 키가 되게), ``None`` 수준·값은 코드 −1.
 
-``keys(G)`` 는 행마다 int64 키(−0 → 0, NaN 정규화). 같은 표현형 = 같은 키. 소비자 ``canonical`` 은 G
-를 제자리에서 고쳐 조건부로 평평한 유전자를 NaN/−1 로 만든다(같은 표현형 = 같은 키).
+``keys(G)`` 는 행마다 int64 키(−0 → 0, NaN 정규화). 같은 표현형 = 같은 키. 소비자 ``canonical``
+은 G 를 제자리에서 고쳐 조건부로 평평한 유전자를 NaN/−1 로 만든다(같은 표현형 = 같은 키).
 """
 
 from __future__ import annotations
@@ -221,7 +220,9 @@ class Space:
                 t = tuple(_lv(x) for x in do[g.name])
                 g = replace(g, levels=t * 2 if len(t) == 1 else t)
             elif isinstance(g, Real) and g.name in co:
-                g = replace(g, lo=float(co[g.name][0]), hi=float(co[g.name][1]))
+                c = co[g.name]
+                off = c[2] if len(c) >= 3 else g.off          # [lo, hi, off]: null = 끔 없음(필수)
+                g = replace(g, lo=float(c[0]), hi=float(c[1]), off=off)
             new.append(g)
         on = {g.name for g in self.genes} | set(no) | set(do) | set(co)
         return Space(new, off_zone=self.off_zone, digits=self.digits, active=on)

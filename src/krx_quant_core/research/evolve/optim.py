@@ -10,8 +10,8 @@
 
 - ``"cmawm"`` — :class:`FastCMAwM`. ``cmaes.CMAwM`` 상속, 표본마다 다시 하던 ``B·diag(D)`` 를 세대당
   한 번, 이산 부호화 일괄, scipy 없을 때 ``chi2_ppf``·``norm_cdf`` 를 라이브러리 스칼라 함수
-  그대로(+ 값 memo) 루프로. **라이브러리와 비트 동일 궤적**(시험). cmaes 가 0.13.x 가 아니면
-  라이브러리 경로로 폴백.
+  그대로(+ 값 memo) 루프로. **라이브러리와 비트 동일 궤적**(시험). cmaes 가 정확히 0.13.1 이
+  아니면 라이브러리 경로로 폴백.
 - ``"catcmawm"`` — ``cmaes.CatCMAwM``(Hamano et al. 2025). Real → 연속, Ordinal → 정수(수준 번호),
   Choice → 범주형. 범위 밖 Real 은 재표본이 아니라 잘림(끔 끝에 질량이 쌓인다 — 백엔드 비교 때
   공개).
@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import math
+import threading
 import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -36,7 +37,7 @@ from krx_quant_core.research.evolve.space import Space
 __all__ = ["BACKENDS", "BipopResult", "FastCMAwM", "bipop", "make_backend"]
 
 BACKENDS = ("cmawm", "catcmawm", "cmawm_lib")
-_FAST_VERSIONS = ("0.13.",)
+_FAST_VERSIONS = ("0.13.1",)          # FastCMAwM 이 가정하는 cmaes 내부 — 정확히 이 판
 
 
 def _cmaes():
@@ -48,7 +49,8 @@ def _cmaes():
     return cmaes
 
 
-# --------------------------------------------------------------------------- FastCMAwM
+# ---------------------------------------------------------------------------
+# FastCMAwM
 # ---------------------------------------------------------------------------
 
 def _chi2_ppf_bisect(q):
@@ -111,6 +113,8 @@ def _fast_stats_patch():
         a = np.asarray(q, dtype=float)
         out = np.empty(a.shape)
         flat_in, flat_out = a.ravel(), out.reshape(-1)
+        if len(memo) > 200_000:                      # 값 memo 상한(프로세스 전역)
+            memo.clear()
         for i, v in enumerate(flat_in.tolist()):
             r = memo.get(v)
             if r is None:
@@ -132,28 +136,33 @@ def _fast_stats_patch():
 
 
 _PATCH: tuple | None = None
+_PATCH_LOCK = threading.RLock()
 
 
 @contextlib.contextmanager
 def _patched_stats():
+    """``tell`` 동안만 모듈 전역을 바꾼다.
+
+    스레드 사이 겹침은 잠금으로 막는다 — 값은 원본과 비트 동일."""
     global _PATCH
     from cmaes import _cmawm  # noqa: PLC0415
 
-    if _PATCH is None:
-        _PATCH = _fast_stats_patch()
-    old = (_cmawm.chi2_ppf, _cmawm.norm_cdf)
-    _cmawm.chi2_ppf, _cmawm.norm_cdf = _PATCH
-    try:
-        yield
-    finally:
-        _cmawm.chi2_ppf, _cmawm.norm_cdf = old
+    with _PATCH_LOCK:
+        if _PATCH is None:
+            _PATCH = _fast_stats_patch()
+        old = (_cmawm.chi2_ppf, _cmawm.norm_cdf)
+        _cmawm.chi2_ppf, _cmawm.norm_cdf = _PATCH
+        try:
+            yield
+        finally:
+            _cmawm.chi2_ppf, _cmawm.norm_cdf = old
 
 
 def _make_fast_cls():
     cmaes = _cmaes()
     from cmaes import _cmawm, _stats  # noqa: PLC0415
 
-    fast_ok = cmaes.__version__.startswith(_FAST_VERSIONS)
+    fast_ok = cmaes.__version__ in _FAST_VERSIONS
     no_scipy = _cmawm.chi2_ppf is _stats.chi2_ppf
 
     class _FastCMAwM(cmaes.CMAwM):
@@ -230,8 +239,13 @@ class _CMAwMBackend:
         pairs = [self.opt.ask() for _ in range(k)]
         return np.array([p[0] for p in pairs]), [p[1] for p in pairs]
 
-    def tell(self, tokens, values) -> None:
-        self.opt.tell([(t, -float(v)) for t, v in zip(tokens, values, strict=True)])
+    def tell(self, tokens, values) -> list:
+        """라이브러리 ``tell`` 에 (x, −값) 목록을 넘기고 그 목록을 돌려준다.
+
+        라이브러리가 그 목록을 제자리 정렬한다 — 구동기의 정체 판정이 정렬된 목록을 본다."""
+        sols = [(t, -float(v)) for t, v in zip(tokens, values, strict=True)]
+        self.opt.tell(sols)
+        return sols
 
     def should_stop(self) -> bool:
         return bool(self.opt.should_stop())
@@ -274,8 +288,10 @@ class _CatBackend:
                 X[s, sp.n_cont:] = sol.z
         return X, sols
 
-    def tell(self, tokens, values) -> None:
-        self.opt.tell([(t, -float(v)) for t, v in zip(tokens, values, strict=True)])
+    def tell(self, tokens, values) -> list:
+        sols = [(t, -float(v)) for t, v in zip(tokens, values, strict=True)]
+        self.opt.tell(sols)
+        return sols
 
     def should_stop(self) -> bool:
         return bool(self.opt.should_stop())
@@ -298,7 +314,8 @@ def make_backend(backend: str, *, space: Space | None, n_cont: int, disc_sizes: 
     raise ValueError(f"backend 는 {BACKENDS} 중 하나")
 
 
-# --------------------------------------------------------------------------- BIPOP 구동기
+# ---------------------------------------------------------------------------
+# BIPOP 구동기
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -410,8 +427,10 @@ def bipop(evaluate: Callable, space: Space | None = None, *, budget: int, seed: 
                 new.append(i)
         if new:
             out = evaluate([payloads[i] for i in new])
-            if isinstance(out, tuple):
+            if isinstance(out, tuple) and out[1] is not None:
                 vals, cnts = np.asarray(out[0], float), np.asarray(out[1])
+            elif isinstance(out, tuple):
+                vals, cnts = np.asarray(out[0], float), np.full(len(new), -1)
             else:
                 vals, cnts = np.asarray(out, float), np.full(len(new), -1)
             if len(vals) != len(new):
@@ -464,9 +483,11 @@ def bipop(evaluate: Callable, space: Space | None = None, *, budget: int, seed: 
             zero += int(np.sum(cnts == 0))
             if k < opt.population_size:
                 break
-            opt.tell(tokens, vals)
+            sols = opt.tell(tokens, vals)
             gens += 1
-            g_best = float(np.max(vals))
+            # swing-it 과 같은 식: 라이브러리가 제자리 정렬한 목록 위 파이썬 min
+            # (NaN 이 섞이면 위치 의존까지 같게)
+            g_best = -min(v for _, v in sols)
             if g_best > run_best + 1e-12:
                 run_best, since = g_best, 0
             else:

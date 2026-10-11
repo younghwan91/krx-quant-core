@@ -23,10 +23,13 @@ __all__ = [
     "HAVE_NUMBA",
     "block_boot",
     "block_boot_lower",
+    "block_boot_lower_nb",
     "h32",
     "monthly_block_lower",
     "monthly_sums",
+    "monthly_sums_nb",
     "percentile_linear",
+    "percentile_nb",
 ]
 
 M32 = 0xFFFFFFFF
@@ -167,3 +170,15 @@ def monthly_block_lower(x: np.ndarray, month_of: np.ndarray, t_lo: int, block: i
     if mo.shape[0] < min_months:
         return float(short)
     return block_boot_lower(mo, block, n_boot, seed, q)
+
+
+# --- 소비자 njit 커널 안에서 부를 수 있는 판(검사 없음 — 인자는 호출자가 보장한다) ---
+#: ``percentile_nb(x, q)`` — ``np.percentile`` 비트 동일(NaN 이면 NaN, 빈 배열 금지).
+percentile_nb = _percentile
+#: ``block_boot_lower_nb(monthly, block, n_boot, seed, q)`` —
+#: :func:`block_boot_lower` 의 검사 없는 판.
+block_boot_lower_nb = _block_boot_lower
+#: ``monthly_sums_nb(x, month_of, t_lo, sums, ids) -> k`` —
+#: ``sums``·``ids`` (길이 ≥ len(x)) 앞 k 칸을 채운다.
+#: ``month_of`` 는 비감소여야 한다(호출자 보장).
+monthly_sums_nb = _monthly_sums

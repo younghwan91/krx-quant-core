@@ -38,9 +38,11 @@ def ref_tables(menu):
         disc = (*disc, *((n, _dl(_do[n])) for n in EVO_GENES if n in _do))
         nom = tuple((n, tuple(_lv(x) for x in _no[n]) if n in _no else v) for n, v in nom)
         disc = tuple((n, _dl(_do[n]) if n in _do else v) for n, v in disc)
-        cont = tuple((c[0], float(_co[c[0]][0]), float(_co[c[0]][1]), c[3]) if c[0] in _co else c
-                     for c in cont)
-        cont = (*cont, *(EVO_CONT[n][:1] + (float(_co[n][0]), float(_co[n][1]), "hi")
+        def _off(n, c3):                    # e3ccc11: [lo, hi, null] = 끔 없음
+            return _co[n][2] if len(_co[n]) >= 3 else c3
+        cont = tuple((c[0], float(_co[c[0]][0]), float(_co[c[0]][1]), _off(c[0], c[3]))
+                     if c[0] in _co else c for c in cont)
+        cont = (*cont, *(EVO_CONT[n][:1] + (float(_co[n][0]), float(_co[n][1]), _off(n, "hi"))
                          for n in EVO_CONT if n in _co))
     return cont, nom, disc
 
@@ -89,6 +91,9 @@ MENUS = [
                                                  "exit_safe": [2], "trail_start": [1, 2]},
      "cont": {"sup_c": [-0.15, 0.0], "atr_max": [0.015, 0.06]}},
     {"disc": {"entry_q": [1], "trail_start": [0, 1]}},
+    {"cont": {"rs_min": [0.0, 90.0, None], "sup_hw": [0.1, 1.0, None],
+              "atr_max": [0.02, 0.05, None],
+              "fb_tol": [0.0, 0.03, "lo"]}},          # e3ccc11 G4C 형식: 세 번째 원소 = 끔 끝
 ]
 
 

@@ -235,3 +235,39 @@ def test_catcmawm_single_level_choice():
     sp = Space([Real("a", 0, 1), Choice("one", ("x",)), Ordinal("o", (1, 2, 3))])
     r = bipop(lambda P: [float(p[0]) for p in P], sp, budget=200, seed=0, backend="catcmawm")
     assert len(r.hist_values) == 200
+
+
+@pytest.mark.parametrize("backend", ["cmawm", "cmawm_lib"])
+@pytest.mark.parametrize("seed", range(8))
+def test_bipop_matches_reference_with_nan_fitness(seed, backend):
+    """적합도에 NaN 이 섞여도(정체 판정이 파이썬 min 위치 의존) 같은 이력·재시작."""
+    sp = _space()
+
+    def fit_nan(G):
+        v, n = _fit_rows(G)
+        k = sp.keys(G)
+        v = np.where((k % 5) == 0, np.nan, v)                  # 키 기반 — 두 경로가 같은 행에 NaN
+        return v, n
+
+    memo: dict = {}
+
+    def fn(x):
+        G = sp.decode(x[None, :])
+        k = int(sp.keys(G)[0])
+        if k not in memo:
+            v, n = fit_nan(G)
+            memo[k] = (float(v[0]), int(n[0]))
+        return memo[k]
+
+    hist, rst = ref_cma_bipop_x0(fn, sp.n_cont, sp.disc_sizes, budget=2500, seed=seed, x0=_x0(sp))
+    r = bipop(lambda P: fit_nan(np.array(P)), sp, budget=2500, seed=seed, x0=_x0(sp),
+              backend=backend)
+    assert np.array_equal(r.hist_values, np.array([h[2] for h in hist]), equal_nan=True)
+    assert [d["why"] for d in r.restarts] == [d["why"] for d in rst]
+    assert [d["evals"] for d in r.restarts] == [d["evals"] for d in rst]
+
+
+def test_evaluate_tuple_with_none_counts():
+    sp = _space()
+    r = bipop(lambda P: (np.zeros(len(P)), None), sp, budget=100, seed=0)
+    assert len(r.hist_values) == 100

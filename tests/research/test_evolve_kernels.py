@@ -116,3 +116,23 @@ def test_numba_and_python_paths_identical():
     py = K.block_boot.py_func(mo, 3, 300, 11)
     assert np.array_equal(py, K.block_boot(mo, 3, 300, 11))
     assert K._percentile.py_func(py, 2.5) == K._percentile(py, 2.5)
+
+
+def test_nb_aliases_callable_from_njit():
+    """소비자 njit 커널 안에서 부를 수 있다(numba 가 있으면 실제 njit 안에서)."""
+    rng = np.random.default_rng(4)
+    month_of = np.repeat(np.arange(30), 20)
+    x = rng.normal(0, 0.01, 400)
+
+    def user(x, month_of):
+        sums = np.empty(x.shape[0])
+        ids = np.empty(x.shape[0], np.int64)
+        k = K.monthly_sums_nb(x, month_of, 0, sums, ids)
+        return K.block_boot_lower_nb(sums[:k], 3, 500, 0, 2.5), K.percentile_nb(sums[:k], 50.0)
+
+    if K.HAVE_NUMBA:
+        import numba
+        user = numba.njit(user)
+    lo, med = user(x, month_of)
+    mo, _ = K.monthly_sums(x, month_of, 0)
+    assert lo == K.block_boot_lower(mo, 3, 500, 0) and med == np.percentile(mo, 50.0)

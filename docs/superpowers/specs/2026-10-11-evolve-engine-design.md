@@ -161,3 +161,18 @@ res.best_key, res.best_value, res.hist_keys, res.hist_values, res.restarts, res.
 - DSR N = **등록 수**(완료 + 미완). 결과 줄은 N 에 안 센다.
 - 봉인: 청산 행 ≥ 경계면 `SealBreach`. 학습창 재평가는 자르기 전에.
 - 패리티 시험 범위: 이력 값 + 최적 repr·uniq·memo 순서·재시작 기록·`random(rng, n)`. BLAS 스레드 1.
+
+## 검증 2차 반영 (2026-10-11 19:30, 구현 검증 에이전트 MUST 1 · SHOULD 4)
+
+- `Space.override` cont 세 번째 원소(`[lo, hi, off]`, `null` = 끔 없음 — swing-it e3ccc11·G4C) 반영, 시험 참조
+  사본도 e3ccc11 판으로.
+- NaN 적합도: 정체 판정을 swing-it 과 같은 식(**라이브러리가 제자리 정렬한 목록** 위 파이썬 `min`)으로 —
+  NaN 섞인 8 시드 × 두 백엔드 이력·재시작 동일.
+- `EvoPool`: 부모 환경은 작업자를 장벽으로 모두 띄우는 동안만 바꾸고 되돌린다(열린 동안 부모 numba 컴파일이
+  죽던 문제).
+- `EvoLedger.result(reg)` — 결과 줄이 등록 지문을 가리킨다(같은 이름·시드, 메뉴만 다른 재등록이 죽은 실행을
+  가리던 문제). 예약 키 덮어쓰기 금지.
+- `race` 기본값 k=3·min_sets=5(모의 오류율 문서화), `race(ledger=)` 가 인자를 결과 전 줄로 적는다. swing-it 5세대는
+  결과 전에 k=3·min_sets=5 로 사전등록 정정(G5-1).
+- 그 밖: `FastCMAwM` 은 cmaes 정확히 0.13.1 일 때만, chi2 memo 상한·패치 잠금, `Seal` 범위 밖 날짜 거부,
+  `evaluate` 가 `(값, None)` 을 돌려줘도 됨, njit 안에서 부르는 `*_nb` 커널 공개.

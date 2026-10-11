@@ -447,7 +447,8 @@ res.best_payload, res.best_value, res.uniq, res.restarts, res.top(5)
 **실데이터 대조**(simnode, 2026-10-11, swing-it FWM 엔진 + 3세대 G3A 메뉴, 63차원): swing-it
 `ga_run_one` 과 코어 `bipop`(`keyfn` = swing-it `decode`·`gkey`)이 폴드 1·3, 시드 0·1·5·100, 예산
 6,000~10,000 에서 최적 config repr·적합도·진입 수·uniq·ghash 집합·곡선·상위 5·재시작 기록까지 **전부
-같다**(두 백엔드 모두). 적합도 꼬리(월 합·블록 부트스트랩·백분위)는 실제 포트폴리오 1,622개에서 비트 동일.
+같다**(두 백엔드 모두, 재시작 풀 35행·재시작 2회 포함). 적합도 꼬리(월 합·블록 부트스트랩·백분위)는
+실제 학습창 1,622개(체결이 있는 것 58개)에서 비트 동일, 검증 에이전트 재실행 3,002개(체결 46개)도 동일.
 
 | 층 | 전 → 후 (ms/평가, 작업자 1개) |
 |---|---|
@@ -455,14 +456,17 @@ res.best_payload, res.best_value, res.uniq, res.restarts, res.top(5)
 | 적합도 꼬리 `monthly → block_boot → percentile` | 0.33 → 0.11 |
 | 나머지 = swing-it 평가 접착 `candidates`·`run` | 1.0 (그대로 — 전략 코드, swing-it 몫) |
 
-끝까지 가속하려면 swing-it 쪽 순서: ① `ga_fast._jit` 을 `cache=True`(작업자마다 후보 실행마다 약 9초 JIT)
-② 코어 `bipop` + `kernels.monthly_block_lower` 로 교체(위 대조로 바이트 동일) ③ `candidates`·`run` 의 배열
-복사·`astype`·`concatenate` 를 njit 한 번 호출로 — 평가 하나가 커널 시간(수십 µs)에 가까워진다.
+끝까지 가속하려면 swing-it 쪽 순서: ① 코어 `bipop` + `kernels` 로 교체(위 대조로 바이트 동일)
+② `candidates`·`run`·벌점·꼬리의 배열 복사·`astype`·`concatenate`·dict 를 njit 한 번 호출로(`*_nb`
+커널을 njit 안에서 부른다). JIT 디스크 캐시(`cache=True`)는 조심 — numba 는 다른 파일의 피호출 커널이
+바뀌어도 캐시를 무효화하지 않는다(swing-it `_jit` 이 `cache=False` 인 이유).
 
 **세대 판정.** swing-it 잡음 규칙(평균 차 > 큰 sd × 2)은 sd 가 시드 집합 수로 줄지 않아 집합을 늘려도
 검정력이 안 는다(2세대 G1C ±1.03%p 면 2.06%p 미만 차이는 영원히 구분 불가). `race` 는 모든 후보가 같은
-시드 집합을 돌리는 점을 써서 짝 차이의 SE(√n 으로 준다)로 가른다 — `k`·`min_sets`·`max_sets`·시드 순서는
-결과 전에 등록하고, 살아남은 후보 평균의 승자의 저주는 봉인 구간에서만 판정해 피한다.
+시드 집합을 돌리는 점을 써서 짝 차이의 SE(√n 으로 준다)로 가른다 — `race(ledger=)` 가 `k`·`min_sets`·
+`max_sets`·시드 순서를 첫 라운드 전에 원장에 적고, 살아남은 후보 평균의 승자의 저주는 봉인 구간에서만
+판정해 피한다. 기본 k=3·min_sets=5: 라운드마다 다시 검사하므로 k=2·min_sets=3 은 같은 후보 5개 중
+2.4개를 잘못 떨군다(모의) — k=3·min_sets=5 는 0.7개.
 
 ## 설계 원칙
 

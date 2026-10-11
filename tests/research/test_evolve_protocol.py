@@ -25,15 +25,29 @@ from krx_quant_core.research.evolve.protocol import (
 
 def test_ledger_pre_result_pending_and_n(tmp_path):
     L = EvoLedger("pattern_ga_evo", logs_dir=tmp_path)
-    L.register("G1A", menu={}, seeds=range(10), rationale="기준선", git_head="abc")
-    L.register("G1B", menu={"nom": {"entry": ["bottom"]}}, seeds=range(10))
+    ra = L.register("G1A", menu={}, seeds=range(10), rationale="기준선", git_head="abc")
+    rb = L.register("G1B", menu={"nom": {"entry": ["bottom"]}}, seeds=range(10))
     # 같은 줄 — 중복 안 셈
-    L.register("G1B", menu={"nom": {"entry": ["bottom"]}}, seeds=range(10))
-    L.result("G1A", seeds=range(10), metrics={"ann": -0.0378, "n": 106})
+    assert L.register("G1B", menu={"nom": {"entry": ["bottom"]}}, seeds=range(10)) == rb
+    L.result(ra, metrics={"ann": -0.0378, "n": 106})
     assert L.n_trials() == 2
     assert [p["candidate"] for p in L.pending()] == ["G1B"]
-    L.result("G1B", seeds=range(10), metrics={"ann": -0.0129})
+    L.result(rb, metrics={"ann": -0.0129})
     assert L.pending() == [] and L.n_trials() == 2            # 결과 줄은 N 에 안 센다
+
+
+def test_ledger_same_name_seeds_different_menu_not_masked(tmp_path):
+    """같은 이름·시드, 메뉴만 다른 두 등록 — 하나의 결과가 다른 하나를 가리지 않는다."""
+    L = EvoLedger("evo", logs_dir=tmp_path)
+    r1 = L.register("G4A", menu={"a": 1}, seeds=[0, 1])
+    L.register("G4A", menu={"a": 2}, seeds=[0, 1])
+    L.result(r1, metrics={"ann": 0.0})
+    assert [p["menu"] for p in L.pending()] == [{"a": 2}]
+    assert L.n_trials() == 2
+    with pytest.raises(KeyError):
+        L.result("nope", metrics={})
+    with pytest.raises(ValueError):
+        L.register("X", menu={}, seeds=[0], role="result")
 
 
 def test_summarize_and_distinguish_reproduce_gen2_table():
@@ -84,10 +98,40 @@ def test_race_run_round_batches_and_validates():
 
     r = race(["A", "B"], [0, 1, 2, 3], run_round=run_round, min_sets=3)
     assert r.alive == ["A"] and len(calls) == 3                # 짝 차 −1, SE 0 → 3번째에 탈락
+    assert r.params["k"] == 3.0 and r.params["seed_offsets"] == [0, 1, 2, 3]
     with pytest.raises(ValueError):
         race(["A"], [0], run=lambda c, o: 0.0, min_sets=1)
     with pytest.raises(ValueError):
         race(["A", "A"], [0, 1, 2], run=lambda c, o: 0.0)
+
+
+def test_race_registers_params_before_first_round(tmp_path):
+    L = EvoLedger("evo", logs_dir=tmp_path)
+    seen = []
+
+    def run(c, o):
+        seen.append(L.n_trials())                     # 첫 평가 때 이미 레이싱 인자가 원장에 있다
+        return 0.0
+
+    race(["A", "B"], range(6), run=run, ledger=L, name="G5-race")
+    assert seen[0] == 1
+    reg = L.registrations()[0]
+    assert reg["candidate"] == "G5-race" and reg["race"]["min_sets"] == 5
+
+
+def test_race_default_error_rate_small():
+    """기본값(k=3, min_sets=5)은 모두 같은 후보 5개 중 거의 안 떨군다(문서 모의의 축소판)."""
+    rng = np.random.default_rng(7)
+    wrong = 0
+    for _ in range(200):
+        fx = rng.normal(0, 1.0, 10)
+        noise = rng.normal(0, 1.0, (6, 10))
+
+        def run(c, o, fx=fx, noise=noise):
+            return fx[o] + noise[int(c), o]
+
+        wrong += len(race([str(i) for i in range(6)], range(10), run=run).eliminated)
+    assert wrong / 200 < 1.2
 
 
 def test_seal_clip_and_check():
@@ -98,6 +142,10 @@ def test_seal_clip_and_check():
     s.check([0, s.row - 1])
     with pytest.raises(SealBreach):
         s.check([s.row])
+    with pytest.raises(ValueError):
+        Seal(days, "2023-01-01")                           # 자료 앞
+    with pytest.raises(ValueError):
+        Seal(days, "2025-01-01")                           # 자료 뒤
 
 
 def test_digest_stable_and_typed():
@@ -116,10 +164,15 @@ def test_provenance_fields():
 def test_pool_order_and_single_thread_env():
     before = {k: os.environ.get(k) for k in THREAD_ENV}
     with EvoPool(3) as pool:
+        # 부모 환경은 열린 동안에도 그대로
+        assert {k: os.environ.get(k) for k in THREAD_ENV} == before
+        assert len(pool.pids) == 3
         out = pool.map(math.factorial, [9, 1, 7, 3, 12, 0])
-        env = pool.map(os.getenv, list(THREAD_ENV))
+        env = pool.map(os.getenv, list(THREAD_ENV) * 4)                 # 작업자 3개 모두
+        pids = set(pool.pids)
     assert out == [math.factorial(x) for x in [9, 1, 7, 3, 12, 0]]
-    assert env == ["1"] * len(THREAD_ENV)
+    assert env == ["1"] * len(THREAD_ENV) * 4
+    assert len(pids) == 3
     assert {k: os.environ.get(k) for k in THREAD_ENV} == before
     with pytest.raises(RuntimeError):
         EvoPool(2).map(abs, [1])
