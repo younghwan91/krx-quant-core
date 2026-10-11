@@ -50,6 +50,19 @@ wheels = [
 ]
 
 [[package]]
+name = "cmaes"
+version = "0.13.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/94/ce/dcf35c4db556fcd25547f62b3b3fbf9e69f44054ff85434310702e29ac52/cmaes-0.13.1.tar.gz", hash = "sha256:5f56a9e8dd769ffd23ac2ad651979bdb6ca8846de60d97d03fe5ad8456c56c79", size = 61781, upload-time = "2026-08-21T13:42:59.347Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ff/18/1004ca44ba64b8b5ee24968246e056ff2110916250cc1a1ac4239ea407a8/cmaes-0.13.1-py3-none-any.whl", hash = "sha256:659881b1d574adf0b378448821e3da24a4f7b7a1989640cd902000c567897db5", size = 73401, upload-time = "2026-08-21T13:42:57.941Z" },
+]
+
+[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -217,8 +230,12 @@ db = [
     { name = "psycopg", extra = ["binary"] },
 ]
 dev = [
+    { name = "cmaes" },
     { name = "pytest" },
     { name = "ruff" },
+]
+evo = [
+    { name = "cmaes" },
 ]
 fast = [
     { name = "numba" },
@@ -229,6 +246,8 @@ opt = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cmaes", marker = "extra == 'dev'", specifier = "==0.13.1" },
+    { name = "cmaes", marker = "extra == 'evo'", specifier = "==0.13.1" },
     { name = "kiwoom-client", specifier = ">=0.4.0" },
     { name = "numba", marker = "extra == 'fast'", specifier = ">=0.60" },
     { name = "numpy", specifier = ">=1.24" },
@@ -238,7 +257,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.16.2" },
 ]
-provides-extras = ["dev", "fast", "db", "opt"]
+provides-extras = ["dev", "fast", "db", "opt", "evo"]
 
 [[package]]
 name = "llvmlite"

@@ -132,3 +132,32 @@ res.best_key, res.best_value, res.hist_keys, res.hist_values, res.restarts, res.
 ## 검증
 
 각 단계(스펙·구현·실데이터 대조)마다 독립 검증 에이전트가 따라붙는다. 반영 전에는 완료를 보고하지 않는다.
+
+## 검증 1차 반영 (2026-10-11 18:40, 스펙 검증 에이전트 MUST 4 · SHOULD 7 · NOTE 4)
+
+- **반올림(MUST 1):** Real 값은 파이썬 `round(·, digits)`(정확한 십진 반올림)로 만든다. `np.round` 는 동점
+  (k+0.5)/10⁴ 90만 건 중 38.9만 건에서 다르다.
+- **레이싱(MUST 2):** swing-it 규칙(평균 차 > 큰 sd × 2)은 표준편차가 n 으로 줄지 않아 시드 집합을
+  더해도 검정력이 안 는다. `distinguish` 는 호환용으로 남기고, `race` 는 **같은 시드 집합을 공유하는 짝
+  차이의 표준오차** 규칙(평균 짝 차 + k·SE < 0 이면 탈락, k·min_sets·max_sets·시드 순서는 결과 전 등록)을
+  쓴다. 공개할 편향: 살아남은 후보 평균의 승자의 저주·선택적 정지, n 이 작을 때(2 자유도) 탈락은 되돌리지
+  않음, n 이 다른 평균끼리 비교 금지 — 보고는 같은 시드 집합 위 짝 차이로만.
+- **이름 있을 때만 붙는 유전자(MUST 3):** `optional=True` 유전자는 덮어쓰기에 이름이 있을 때만 켜지고,
+  같은 종류 안에서 **선언 순서**로 붙는다(swing-it `EVO_GENES`·`EVO_CONT` 와 같은 DIM·배치).
+- **키·해시(MUST 4):** 구동기는 Space 와 분리한다 — `keyfn(X) -> (keys, payloads)` 를 소비자가 줄 수 있고
+  (swing-it 은 자기 `decode`·`gkey` 그대로 → 패리티 자명), 기본 `keyfn` 이 Space 를 쓴다. Space 키는
+  −0 → 0, 같은 값 수준 접기, `None` 수준 = 끔(코드 −1)로 swing-it `gkey` 동치류와 맞춘다. memo 에는
+  **처음 본 원래 행**(−0.0 포함)을 남긴다. ghash 호환은 소비자 몫(`to_dict` 로 계산).
+- 범주형 유전자는 `extra=` 로 canonical 이 쓸 수 있는 메뉴 밖 값을 선언한다(코드는 수준+extra 어휘).
+- `FastCMAwM`: 표본마다 `randn(n)` 한 번·`BD.dot(z)` 행렬-벡터(일괄 `Z@BD.T` 는 3,150 중 2,583 불일치),
+  고유분해는 라이브러리 `_eigen_decomposition` 으로 지연, scipy 경로는 `cmaes._cmawm.chi2_ppf is
+  cmaes._stats.chi2_ppf` 로 판별. `chi2_ppf` 는 `tell`(세대당)에서만 돈다(위 근거 표의 '표본마다' 정정).
+- BIPOP: 재시작마다(첫 런 포함) `rng.random(dim)` 뒤 풀이 있으면 `rng.integers`, 예산 끝에서는 **남은 수만**
+  묻고 평가, 배치 안 중복은 처음 것, memo 에 진입 수 저장(`zero_frac` 이 memo 적중도 센다), 최적 = 이력
+  순서 첫 최대.
+- CatCMAwM: `cov` 를 명시(경계 위 평균이면 기본 폭 0), `mean` 은 복사해 넘김, 한 수준 Choice 는 복제,
+  범위 밖 Real 은 잘림(끔 끝에 질량이 쌓임 — CMAwM 재표본과 다름, 백엔드 비교 때 공개). `lam0` 는
+  `4 + ⌊3·ln(연속+정수+범주 수)⌋`.
+- DSR N = **등록 수**(완료 + 미완). 결과 줄은 N 에 안 센다.
+- 봉인: 청산 행 ≥ 경계면 `SealBreach`. 학습창 재평가는 자르기 전에.
+- 패리티 시험 범위: 이력 값 + 최적 repr·uniq·memo 순서·재시작 기록·`random(rng, n)`. BLAS 스레드 1.
