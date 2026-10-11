@@ -1,6 +1,6 @@
 [project]
 name = "krx-quant-core"
-version = "0.7.0"
+version = "0.8.0"
 description = "한국 주식(KOSPI·KOSDAQ) 퀀트 공통 코어 — 호가단위·가격제한폭·세션, 일자별 거래세 비용모델, 주문 가드, 공시 리스크 분류, 체결 시뮬레이션, Deflated Sharpe·purged CV 검증 통계, 공용 데이터 층(COPY·mmap 캐시)"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -23,13 +23,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff==0.16.2"]
+dev = ["pytest>=8.0", "ruff==0.16.2", "cmaes==0.13.1"]
 # 초 격자 호가 리플레이 커널(backtest.lob) 가속. 없으면 같은 커널을 파이썬으로 돌린다.
 fast = ["numba>=0.60"]
 # 실행 기록 Postgres 색인(runtime.runindex). 없으면 JSONL 만 쓴다.
 db = ["psycopg[binary]>=3.1"]
 # research.optuna_search — TPE 파라미터 탐색. 없으면 research.sweep(grid)만 쓴다.
 opt = ["optuna>=4.0"]
+# research.evolve 최적화기 백엔드(CMAwM·CatCMAwM). FastCMAwM 은 이 버전의 내부를 가정한다 — 다른 버전이면 라이브러리 ask/tell 로 폴백.
+evo = ["cmaes==0.13.1"]
 
 [project.scripts]
 kqc = "krx_quant_core.runtime.cli:main"

@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from .lob._jit import njit
+from krx_quant_core._jit import njit
 
 __all__ = ["forward_max_last", "trailing_sums"]
 
