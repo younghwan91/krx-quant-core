@@ -271,3 +271,23 @@ def test_evaluate_tuple_with_none_counts():
     sp = _space()
     r = bipop(lambda P: (np.zeros(len(P)), None), sp, budget=100, seed=0)
     assert len(r.hist_values) == 100
+
+
+def test_fast_ask_batch_resampling_exhaustion_matches_library():
+    """재표본 한도 소진 가지(n_max_resampling 작게·σ 크게)까지 라이브러리와 같다."""
+    sp = _space()
+    for nmax in (1, 2, 5):
+        kw = dict(mean=np.full(sp.dim, 0.5).clip(sp.bounds[:, 0], sp.bounds[:, 1]), sigma=2.0,
+                  bounds=sp.bounds, steps=sp.steps, seed=nmax, population_size=10,
+                  n_max_resampling=nmax)
+        lib, fast = cmaes.CMAwM(**kw), FastCMAwM(**kw)
+        for _ in range(30):
+            pairs = [lib.ask() for _ in range(lib.population_size)]
+            XE, XT = fast.ask_batch(fast.population_size)
+            assert np.array_equal(np.array([p[0] for p in pairs]), XE)
+            assert np.array_equal(np.array([p[1] for p in pairs]), XT)
+            # 같은 난수 상태
+            assert np.array_equal(lib._cma._rng.randn(3), fast._cma._rng.randn(3))
+            v = np.arange(len(XT), dtype=float)
+            lib.tell([(p[1], -x) for p, x in zip(pairs, v, strict=True)])
+            fast.tell([(t, -x) for t, x in zip(XT, v, strict=True)])

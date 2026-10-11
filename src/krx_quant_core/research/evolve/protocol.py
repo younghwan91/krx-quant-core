@@ -21,6 +21,7 @@ swing-it ``research/logs/sepa_explore/META_EVOLUTION.md`` 의 절차를 일반�
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import inspect
 import json
 import math
@@ -191,9 +192,9 @@ def race(candidates: Sequence[str], seed_offsets: Sequence[int], *,
         def run_round(pairs):
             return [run(c, o) for c, o in pairs]
 
-    res = RaceResult({c: {} for c in candidates}, list(candidates))
-    res.params = {"candidates": list(candidates), "seed_offsets": offs[:max_sets], "k": k,
-                  "min_sets": min_sets, "max_sets": max_sets}
+    res = RaceResult({c: {} for c in candidates}, list(candidates),
+                     params={"candidates": list(candidates), "seed_offsets": offs[:max_sets],
+                             "k": k, "min_sets": min_sets, "max_sets": max_sets})
     if ledger is not None:
         ledger.register(name, menu=None, seeds=offs[:max_sets], rationale="레이싱 인자(결과 전)",
                         race=res.params)
@@ -287,16 +288,14 @@ def digest(obj: Any) -> str:
 
 
 def provenance(repo: Path | str | None = None, modules: Sequence[Any] = ()) -> dict:
-    """git HEAD·dirty·모듈 소스 해시·numpy/numba/cmaes 버전."""
-    out: dict[str, Any] = {"python": sys.version.split()[0], "numpy": np.__version__}
-    for name in ("numba", "cmaes", "pandas"):
-        m = sys.modules.get(name)
-        if m is None:
-            try:
-                m = __import__(name)
-            except ImportError:
-                m = None
-        out[name] = getattr(m, "__version__", None) if m else None
+    """git HEAD·dirty·모듈 소스 해시·패키지 판(krx-quant-core·numpy·numba·cmaes·pandas — import 없이
+    설치 메타데이터에서)."""
+    out: dict[str, Any] = {"python": sys.version.split()[0]}
+    for name in ("krx-quant-core", "numpy", "numba", "cmaes", "pandas"):
+        try:
+            out[name] = importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            out[name] = None
     if repo is not None:
         try:
             out["git_head"] = git_head(repo)

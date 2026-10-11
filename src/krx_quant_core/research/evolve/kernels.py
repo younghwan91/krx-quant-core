@@ -17,7 +17,7 @@ import math
 
 import numpy as np
 
-from krx_quant_core.backtest.lob._jit import HAVE_NUMBA, njit
+from krx_quant_core._jit import HAVE_NUMBA, njit
 
 __all__ = [
     "HAVE_NUMBA",
@@ -73,6 +73,16 @@ def block_boot(monthly, block, n_boot, seed):
 
 
 @njit
+def _pct_sorted_pair(s2, g):
+    a = s2[0]
+    b = s2[1]
+    d = b - a
+    if g >= 0.5:
+        return b - d * (1.0 - g)
+    return a + d * g
+
+
+@njit
 def _pct_sorted(s, q):
     n = s.shape[0]
     quant = q / 100.0
@@ -99,8 +109,15 @@ def _percentile(x, q):
     for i in range(n):
         if x[i] != x[i]:
             return math.nan
-    s = np.sort(x)
-    return _pct_sorted(s, q)
+    v = (n - 1) * (q / 100.0)
+    if v >= n - 1 or v < 0:
+        return _pct_sorted(np.sort(x), q)
+    lo = int(math.floor(v))
+    p = np.partition(x, lo)                      # 정렬 없이 lo 번째·그다음 원소(같은 값)
+    s2 = np.empty(2)
+    s2[0] = p[lo]
+    s2[1] = np.min(p[lo + 1:])
+    return _pct_sorted_pair(s2, v - math.floor(v))
 
 
 def percentile_linear(x: np.ndarray, q: float) -> float:
@@ -133,6 +150,8 @@ def _monthly_sums(x, month_of, t_lo, sums, ids):
     prev = -1
     for i in range(n):
         m = month_of[t_lo + i]
+        if k >= 0 and m < prev:
+            return -1                            # 비감소가 아니다
         if k < 0 or m != prev:
             k += 1
             sums[k] = 0.0
@@ -147,16 +166,15 @@ def monthly_sums(x: np.ndarray, month_of: np.ndarray, t_lo: int) -> tuple[np.nda
     ``np.bincount(inv, weights=x)`` 와 같은 값·같은 순서. ``month_of`` 는 비감소여야 한다(거래일
     순)."""
     x = np.ascontiguousarray(x, dtype=np.float64)
-    mo = np.ascontiguousarray(month_of, dtype=np.int64)
-    if t_lo < 0 or t_lo + x.shape[0] > mo.shape[0]:
+    if t_lo < 0 or t_lo + x.shape[0] > len(month_of):
         raise ValueError("month_of 범위를 넘는다")
-    seg = mo[t_lo:t_lo + x.shape[0]]
-    if seg.shape[0] > 1 and np.any(np.diff(seg) < 0):
-        raise ValueError("month_of 가 비감소가 아니다")
+    seg = np.ascontiguousarray(month_of[t_lo:t_lo + x.shape[0]], dtype=np.int64)   # 창만 변환
     sums = np.empty(x.shape[0])
     ids = np.empty(x.shape[0], np.int64)
-    k = _monthly_sums(x, mo, int(t_lo), sums, ids)
-    return sums[:k].copy(), ids[:k].copy()
+    k = _monthly_sums(x, seg, 0, sums, ids)
+    if k < 0:
+        raise ValueError("month_of 가 비감소가 아니다")
+    return sums[:k], ids[:k]
 
 
 def monthly_block_lower(x: np.ndarray, month_of: np.ndarray, t_lo: int, block: int, n_boot: int,
@@ -179,6 +197,5 @@ percentile_nb = _percentile
 #: :func:`block_boot_lower` 의 검사 없는 판.
 block_boot_lower_nb = _block_boot_lower
 #: ``monthly_sums_nb(x, month_of, t_lo, sums, ids) -> k`` —
-#: ``sums``·``ids`` (길이 ≥ len(x)) 앞 k 칸을 채운다.
-#: ``month_of`` 는 비감소여야 한다(호출자 보장).
+#: ``sums``·``ids`` (길이 ≥ len(x)) 앞 k 칸을 채운다. ``month_of`` 가 비감소가 아니면 −1.
 monthly_sums_nb = _monthly_sums

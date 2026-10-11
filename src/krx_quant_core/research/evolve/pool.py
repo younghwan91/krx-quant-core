@@ -20,6 +20,8 @@ import os
 from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
+from krx_quant_core.research.sweep import _default_n_jobs
+
 __all__ = ["THREAD_ENV", "EvoPool"]
 
 THREAD_ENV = ("NUMBA_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")
@@ -44,9 +46,14 @@ def _hold(timeout: float) -> int:
 class EvoPool:
     """``with EvoPool(12, init, (cache,)) as pool: results = pool.map(task, tasks)``."""
 
-    def __init__(self, workers: int, initializer: Callable[..., Any] | None = None,
+    def __init__(self, workers: int | None = None, initializer: Callable[..., Any] | None = None,
                  initargs: Sequence[Any] = (), *, single_thread: bool = True,
                  spawn_timeout: float = 300.0):
+        """``workers`` 기본 = ``run_sweep`` 과 같은 상한: min(CPU − 2, ``KQC_MAX_JOBS``(기본 14)).
+
+        simnode 는 실매매 데몬이 같이 돈다."""
+        if workers is None:
+            workers = _default_n_jobs()
         if workers < 1:
             raise ValueError("workers ≥ 1")
         self.workers = int(workers)

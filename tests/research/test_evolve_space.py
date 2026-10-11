@@ -203,3 +203,14 @@ def test_bounds_steps_shape():
     sp = core_space()
     assert sp.bounds.shape == (sp.dim, 2) and sp.steps.shape == (sp.dim,)
     assert np.all(sp.bounds[sp.n_cont:, 1] == np.array(sp.disc_sizes) - 1)
+
+
+def test_level_values_numeric_table():
+    sp = core_space()
+    t = sp.level_values("theta")
+    assert list(t[:-1]) == [0.03, 0.06, 0.08, 0.1] and np.isnan(t[-1])
+    G = sp.decode(sp.random(np.random.default_rng(0), 50))
+    codes = G[:, sp.col["theta"]].astype(int)
+    assert np.array_equal(t[codes], [sp.to_dict(r)["theta"] for r in G])
+    with pytest.raises(ValueError):
+        sp.level_values("entry")                       # 문자열 수준

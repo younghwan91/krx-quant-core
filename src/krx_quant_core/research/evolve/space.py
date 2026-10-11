@@ -28,7 +28,7 @@ from typing import Any
 
 import numpy as np
 
-__all__ = ["Choice", "Gene", "Ordinal", "Real", "Space"]
+__all__ = ["Choice", "Gene", "Ordinal", "Real", "Space", "layout"]
 
 OFF_ZONE = 0.02
 
@@ -119,6 +119,14 @@ def _lv(v: Any) -> Any:
     return math.inf if v == "inf" else v
 
 
+def layout(n_cont: int, disc_sizes: Sequence[int]) -> tuple[np.ndarray, np.ndarray]:
+    """CMAwM 배치의 (경계, 계단): 연속·로짓 [0, 1](계단 0), 순서형 [0, k−1](계단 1)."""
+    ks = [int(k) for k in disc_sizes]
+    bounds = np.array([[0.0, 1.0]] * n_cont + [[0.0, float(k - 1)] for k in ks]).reshape(-1, 2)
+    steps = np.array([0.0] * n_cont + [1.0] * len(ks))
+    return bounds, steps
+
+
 _M1 = np.uint64(0xBF58476D1CE4E5B9)
 _M2 = np.uint64(0x94D049BB133111EB)
 
@@ -158,8 +166,6 @@ class Space:
         for g in (*self.choices, *self.ordinals):
             self._vocab[g.name], self._codes[g.name] = _vocab(g.levels, g.extra)
         self._real_cols = np.array([self.col[g.name] for g in self.reals], np.int64)
-        self._cat_cols = np.array([self.col[g.name] for g in (*self.choices, *self.ordinals)],
-                                  np.int64)
         self._real_lo = np.array([g.lo for g in self.reals], float)
         self._real_span = np.array([g.hi - g.lo for g in self.reals], float)
         self._off_lo = np.array([g.off == "lo" for g in self.reals], bool)
@@ -191,11 +197,11 @@ class Space:
     @property
     def bounds(self) -> np.ndarray:
         """CMAwM 경계(배치 순서): 연속·로짓 [0, 1], 순서형 [0, k−1]."""
-        return np.array([[0.0, 1.0]] * self.n_cont + [[0.0, float(k - 1)] for k in self.disc_sizes])
+        return layout(self.n_cont, self.disc_sizes)[0]
 
     @property
     def steps(self) -> np.ndarray:
-        return np.array([0.0] * self.n_cont + [1.0] * len(self.disc_sizes))
+        return layout(self.n_cont, self.disc_sizes)[1]
 
     # --- 덮어쓰기 ---
     def override(self, menu: dict | None) -> Space:
@@ -264,9 +270,10 @@ class Space:
         A = G + 0.0                                      # −0.0 → +0.0
         A[np.isnan(A)] = np.nan                          # NaN 비트 하나로
         B = np.ascontiguousarray(A).view(np.uint64)
+        M = _mix(B + np.arange(1, B.shape[1] + 1, dtype=np.uint64))   # 열마다 안쪽 섞기 한 번에
         h = np.full(G.shape[0], np.uint64(0x9E3779B97F4A7C15))
         for c in range(B.shape[1]):
-            h = _mix(h ^ _mix(B[:, c] + np.uint64(c + 1)))
+            h = _mix(h ^ M[:, c])
         return h.view(np.int64)
 
     def to_dict(self, row: np.ndarray) -> dict:
