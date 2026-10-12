@@ -91,3 +91,39 @@ def test_regular_session_005930_2026_10_08():
         assert old["base"].iloc[0] == 2060000
     finally:
         conn.close()
+
+
+def test_review_cases_2026_10():
+    """리뷰 결함 실례(2026-10-13): 소급 분봉·재산정일·ETF·소급 분봉 행의 정규장 보정."""
+    conn = D.connect()
+    try:
+        pre = list(D.BASE_CLOSE_FROM[1:])  # 장 전 — 그날 수급 항등식 없이
+        cases = [
+            # (날짜, 종목, 기준가, adj) — 009730 분봉은 10-12 권리락(−18.27%), 220100 은 09-17
+            # 권리락(−16.67%)이 소급된 값이다(전엔 1,629·6,891 을 기준가로 냈다).
+            (date(2026, 10, 8), "009730", 1993, 1.0),
+            (date(2026, 10, 12), "009730", 1696, 0.8173),  # 재산정일: 2,075 × 0.8173
+            (date(2026, 9, 16), "220100", 8270, 1.0),
+            (date(2026, 9, 17), "220100", 6750, 0.8333),
+            (date(2026, 10, 2), "207940", 1418000, 0.9923),  # 전엔 1,429,000(조정 전)
+        ]
+        for d, code, base, adj in cases:
+            b = D.base_price(d, [code], conn=conn, sources=pre).iloc[0]
+            assert (b.base, b.src) == (base, "minute_bars"), (d, code)
+            assert b.adj == pytest.approx(adj)
+            full = D.base_price(d, [code], conn=conn).iloc[0]  # 수급 항등식과 같은 값
+            assert (full.base, full.src) == (base, "supply_demand_identity")
+        # ETF 는 애프터마켓 대상이 아니다 — 09-14 뒤에도 전일 일봉 종가(전엔 영구 NaN).
+        etf = D.base_price(date(2026, 10, 13), ["069500"], conn=conn,
+                           sources=["daily_bars_raw", "daily_bars"]).iloc[0]  # fmt: skip
+        assert etf.base == 101605 and etf.src == "daily_bars_raw"
+        # 소급 분봉 행은 정규장 값으로 안 쓰고 다음날 항등식으로 종가만 복원(전엔 1,962.5).
+        reg = D.load_daily_bars(date(2026, 9, 22), date(2026, 9, 23), adjusted=False,
+                                codes=["009730", "069500"], conn=conn, store=False,
+                                session="regular").set_index(["code", "date"])  # fmt: skip
+        r = reg.loc[("009730", pd.Timestamp("2026-09-23"))]
+        assert (not r.regular_ok) and r.close_ok and r.close == 1962
+        e = reg.loc["069500"]
+        assert e["regular_ok"].all() and e["close"].tolist() == [111880, 113145]
+    finally:
+        conn.close()
