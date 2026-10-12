@@ -13,12 +13,28 @@ swing-it 은 ``daily_bars_adjusted`` 를 매 실행 ``SELECT *`` 로 통째 읽�
   **반드시** 적는다(swing-it 에서 ``.T`` 를 빠뜨린 실제 버그가 있었다).
 - :func:`trading_calendar` — ``daily_bars`` 의 날짜 집합 →
   :class:`~..market.calendar.TradingCalendar`. KST 하루에 한 번만 DB 에 묻는다.
+
+KRX 데이터 함정 방어(옵트인 — 기존 기본 출력은 그대로):
+
+- **애프터마켓 오염(2026-09-14~, :data:`AFTERMARKET_START`).** 16:00~20:00 연속매매가 생겨 키움
+  일봉·분봉·수급 종가에 정규장 뒤 체결이 섞였다. ``daily_bars``·``daily_bars_adjusted`` 의
+  고가·저가·종가·거래량·거래대금이 정규장 값이 아니다(시가는 정상). :func:`load_daily_bars`
+  ``session="regular"`` 가 분봉 정규장(09:00~15:32) 집계로 바꾼다.
+- **가격제한 기준가 = 전일 정규장 종가.** 일봉 종가로 ``limit_up_price`` 를 계산하면 2026-09-14~
+  대부분의 종목-일에서 틀린다. :func:`base_price` 를 쓴다.
+- **``minute_bars`` 과거분도 원 가격이 아니다** — 이후 권리락·병합이 소급된 값으로 재수집된 날이
+  있다(:func:`regular_session_bars`). 보정 함수들은 ``daily_bars_raw`` 시가와
+  ``corporate_actions`` 계수로 맞춰 본다.
+- **``daily_bars.close`` 는 원 종가가 아니다** — 이후 분할·병합이 소급 반영돼 있다(005930 2017-03-31
+  41,200 vs 실제 2,060,000). 원 종가는 ``daily_bars_raw``(백필 중) 또는 ``supply_demand.close``.
+- ``trade_value`` 단위는 **백만원**(:data:`TRADE_VALUE_UNIT`).
 """
 
 from __future__ import annotations
 
 import math
 import time
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -29,14 +45,67 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from ..market.calendar import TradingCalendar
-from .db import connect, fetch_frame, sql_literal
-from .intraday import TS_UNIT, _today_kst
+from ..market.session import REGULAR_CLOSE
+from ..market.ticks import tick_size_array
+from .db import code_list, connect, fetch_frame, sql_literal
+from .intraday import REGULAR_FIRST_BAR, REGULAR_LAST_BAR, TS_UNIT, _today_kst
 from .store import ColumnStore
 
-__all__ = ["DAILY_COLUMNS", "DailyPanel", "daily_panel", "load_daily_bars", "trading_calendar"]
+__all__ = [
+    "AFTERMARKET_START",
+    "BASE_CLOSE_FROM",
+    "DAILY_COLUMNS",
+    "REGULAR_FLAGS",
+    "TRADE_VALUE_UNIT",
+    "DailyPanel",
+    "base_from_change",
+    "base_price",
+    "daily_panel",
+    "load_daily_bars",
+    "regular_session_bars",
+    "trading_calendar",
+]
 
-#: 일봉 값 열(두 테이블 공통). 원본은 정수, 수정주가는 float.
+#: 일봉 값 열(두 테이블 공통). 원본은 정수, 수정주가는 float. 가격은 원, ``volume`` 은 주,
+#: ``trade_value`` 는 **백만원**(:data:`TRADE_VALUE_UNIT` 을 곱하면 원). 2026-09-14~
+#: 고가·저가·종가·거래량·거래대금은 애프터마켓이 섞인 값이다(:data:`AFTERMARKET_START`).
 DAILY_COLUMNS: tuple[str, ...] = ("open", "high", "low", "close", "volume", "trade_value")
+#: ``daily_bars``·``daily_bars_adjusted``·분봉 집계(:func:`regular_session_bars`) ``trade_value`` 1
+#: 단위의 원 — 백만원. ADV 10억 원 = ``trade_value`` 1,000. (분봉 ``minute_bars.trade_value`` 는 원
+#: 그대로다.)
+TRADE_VALUE_UNIT = 1_000_000
+#: KRX 애프터마켓(16:00~20:00 연속매매, ETF·ETN 제외) 첫 거래일. 이날부터 키움 일봉·분봉·수급 종가에
+#: 정규장 뒤 체결이 섞였다. 이전 행은 정규장 값 그대로다.
+AFTERMARKET_START = date(2026, 9, 14)
+#: :func:`load_daily_bars` ``session="regular"`` 가 덧붙이는 표시 열. ``regular_ok`` =
+#: 고가·저가·종가·거래량·거래대금이 모두 정규장 값, ``close_ok`` = 종가만이라도 정규장 값(수급
+#: 항등식으로 복원한 행 포함).
+REGULAR_FLAGS: tuple[str, ...] = ("regular_ok", "close_ok")
+#: :func:`base_price` 의 ``src`` 우선순위(앞이 이긴다). 뒤 셋은 전일이 :data:`AFTERMARKET_START`
+#: 이전이거나 ETF·ETN(애프터마켓 대상 아님)일 때만.
+BASE_CLOSE_FROM: tuple[str, ...] = (
+    "supply_demand_identity", "minute_bars", "supply_demand", "daily_bars_raw", "daily_bars",
+)  # fmt: skip
+#: 수급 항등식 기준가를 맞출 호가 격자(굵은 것부터). 호가단위 **표**가 아니다 — 등락률을 재현하는
+#: 가장 굵은 격자를 고를 뿐이라 2023-01-25 호가 개편 전후·KOSPI/KOSDAQ 구분 없이 같은 규칙이 된다(표
+#: 정본은 kiwoom-client).
+_IDENTITY_GRIDS = (1000, 500, 100, 50, 10, 5, 1)
+#: ``flu_rt`` 는 등락률(%)×100 을 반올림한 값 — 전일 종가 기준 재계산과의 차이가 2019·2025 표본 100%
+#: 에서 0.5bp 이내.
+_IDENTITY_TOL_BP = 0.5 + 1e-4
+#: 2023-01-25 호가단위 개편 — 현행 호가표(kiwoom-client)로 계산 가격을 반올림하는 것은 이날부터만.
+_TICK_REFORM = date(2023, 1, 25)
+#: 원천 배율 맞춤 허용 오차(로그 차). 분봉 첫 봉 시가 / ``daily_bars_raw`` 시가가 1 또는 이후
+#: ``corporate_actions`` 누적 계수에서 이 안이면 그 배율로 본다. 2025-08~2026-10 실측: 0.3% 넘게
+#: 어긋난 27,380 종목-일 중 26,968 이 계수와 0.1% 안, 나머지 412(첫 봉 빠짐 등 잡음, 최대 수십 %)는
+#: 어느 후보와도 안 맞아 버린다(009300 2026-10-07 시가 13,850 vs 14,100).
+_SCALE_TOL = 0.002
+#: 하루 가격제한 폭(±30%). 같은 날 정규장 종가와 통합 종가는 둘 다 기준가 × [0.7, 1.3] 안이다.
+_LIMIT_BAND = 0.30
+#: 주식(애프터마켓 대상) 코드 목록 — 현재 마스터와 폐지 목록. 어디에도 없으면 ETF·ETN 으로 본다.
+_EQUITY_TABLES = ("stocks", "delisted_stocks", "kind_delistings")
+#: :func:`_prev_session` 이 수급표·분봉에서 직전 거래일을 찾는 범위(일).
+_PREV_LOOKBACK_DAYS = 40
 _VERSION = 1
 
 
@@ -103,6 +172,7 @@ def load_daily_bars(
     codes: Sequence[str] | None = None,
     conn: Any = None,
     store: ColumnStore | bool | None = None,
+    session: Literal["all", "regular"] = "all",
 ) -> pd.DataFrame:
     """일봉 긴 프레임 ``code``(범주형)·``date``·:data:`DAILY_COLUMNS`, ``(code, date)`` 정렬.
 
@@ -111,11 +181,40 @@ def load_daily_bars(
 
     Args:
         adjusted: ``daily_bars_adjusted``(기본 — 분할 반영) 또는 ``daily_bars``.
+            **``False`` 도 원 종가가 아니다** — ``daily_bars`` 에는 이후 액면분할·병합이 소급 반영돼
+            있다(005930 2017-03-31 41,200 vs 실제 2,060,000). 시총·가격제한·호가처럼 그 시점 원
+            가격이 필요하면 ``daily_bars_raw``·``supply_demand.close`` 또는 :func:`base_price`.
         codes: 이 종목만(캐시는 연도 전체로 만들고 잘라낸다).
         store: ``None`` → 기본 캐시, ``False`` → 캐시 안 씀.
+        session: ``"all"``(기본 — 테이블 그대로) 또는 ``"regular"``. ``"regular"`` 이면
+            :data:`AFTERMARKET_START` 이후 행의 고가·저가·종가·거래량·거래대금을 분봉
+            정규장(09:00~15:32) 집계로 바꾸고 :data:`REGULAR_FLAGS` 열을 붙인다(아래). 캐시는 테이블
+            값 그대로이고 보정은 매 호출 DB 집계다.
+
+    ``session="regular"`` 보정 규칙:
+
+    - 분봉이 원 가격인 행: 가격 = 분봉 정규장 값 × (행 시가 / ``daily_bars_raw`` 시가) — 수정주가
+      테이블(또는 이후 분할이 소급된 ``daily_bars``)이면 이 비율이 그날 조정계수다(시가는 오염되지
+      않았다). 거래량 = 분봉 합 / 그 비율, 거래대금 = 분봉 합(백만원). ``regular_ok=True``.
+      ``adjusted=False`` 에서 비율이 1 이 아닌 행(소급된 ``daily_bars``)은 테이블처럼 원 단위
+      정수로.
+      분봉이 원 가격인지는 분봉 첫 봉 시가 / 원주가 시가를 1 또는 이후 ``corporate_actions`` 누적
+      계수에 맞춰 본다(:func:`_snap_retro`). 소급 값이면(원 단위 반올림 탓에 정확히 되돌릴 수
+      없다), 어느 후보와도 안 맞으면(첫 봉 빠짐 등), 원주가 행이 없으면, 분봉 종가가 호가가
+      아니면(스팩 몇 종목) 분봉 없는 행으로 다룬다.
+    - 분봉이 없는 행: ``regular_ok=False``(고가·저가·거래량·거래대금은 테이블 값). 종가만 다음
+      거래일 수급 항등식(:func:`base_from_change`)으로 복원할 수 있으면 복원하고 ``close_ok=True``
+      — 조정계수는 행 종가 / 같은 날 ``supply_demand.close``(둘 다 같은 통합 종가). 다음 거래일
+      수급이 아직 없거나, 다음 거래일이 기준가 재산정일(``corporate_actions`` 사건 — 항등식이 조정
+      기준가다)이거나, 복원값이 하루 가격제한 폭으로 불가능하면 ``close_ok=False``.
+    - ETF·ETN(주식 마스터·폐지 목록에 없는 코드, :func:`_equity_codes`)은 애프터마켓 대상이 아니라
+      테이블 값 그대로 둘 다 ``True``.
+    - 이전 행: 둘 다 ``True``.
     """
     if isinstance(codes, str):
         raise TypeError("codes must be a sequence of codes, not a str (wrap it: [code])")
+    if session not in ("all", "regular"):
+        raise ValueError("session must be 'all' or 'regular'")
     a, b = _as_day(start), _as_day(end)
     if a > b:
         raise ValueError("start must be <= end")
@@ -179,6 +278,581 @@ def load_daily_bars(
     out = pd.DataFrame({"code": cat, "date": dt[order].astype(f"datetime64[{TS_UNIT}]")})
     for col in DAILY_COLUMNS:
         out[col] = np.concatenate([np.asarray(p[col]) for p in years])[order]
+    if session == "all":
+        return out
+    return _with_conn(conn, lambda c: _to_regular(c, out, a, b, codes is not None, not adjusted))
+
+
+# ── 정규장 보정·가격제한 기준가 ──────────────────────────────────────────────────────────────
+
+
+def base_from_change(close: Any, flu_rt: Any) -> NDArray[np.float64]:
+    """수급 표의 (종가, ``flu_rt``) → **그날** 가격제한 기준가(보통 전일 정규장 종가).
+
+    ``supply_demand.close`` 는 2026-09-14~ 애프터마켓이 섞인 통합 종가지만 ``flu_rt``(등락률 % ×
+    100)는 KRX 기준가 대비라 ``close / (1 + flu_rt/1e4)`` 가 기준가다(항등식 — 전일 정규장 종가와
+    99.98% 일치). 권리락·배당락처럼 기준가가 조정된 날은 조정 기준가가 나온다(가격제한에는 그게
+    맞다).
+
+    ``flu_rt`` 해상도(1bp, 반올림) 때문에 몫은 ±0.5bp 로만 맞으므로
+    호가 격자(1000·500·100·50·10·5·1원)를 굵은 것부터 반올림해 등락률을 0.5bp 안에서 재현하는 첫
+    값을 고른다 — 호가단위 표 없이 2023-01-25 개편 전후·시장 구분에 같은 규칙이다. 종가는
+    절댓값(키움 부호 관례). 종가 ≤ 0·결측이거나 재현 격자가 없으면 NaN.
+
+    한계: 호가단위/가격이 1bp 미만인 종목(10만 원대 ETF·ETN 5원 호가, 개편 전 KOSDAQ 100만 원대
+    100원 호가)은 한 틱 어긋날 수 있다.
+    """
+    c, r = np.broadcast_arrays(
+        np.abs(np.asarray(close, dtype=np.float64)), np.asarray(flu_rt, dtype=np.float64)
+    )
+    out = np.full(c.shape, np.nan)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        b0 = c / (1.0 + r / 1e4)
+        todo = np.isfinite(b0) & (b0 > 0) & (c > 0)
+        for g in _IDENTITY_GRIDS:
+            v = np.round(b0 / g) * g
+            ok = todo & (v > 0) & (np.abs((c / v - 1.0) * 1e4 - r) <= _IDENTITY_TOL_BP)
+            out[ok] = v[ok]
+            todo &= ~ok
+    return out
+
+
+# 원천 배율·종목 구분 도우미 ------------------------------------------------------------------
+
+
+def _round_tick(price: Any, etf: Any = False) -> NDArray[np.float64]:
+    """가격을 그 가격대 호가단위로 반올림(현행 표 — :data:`_TICK_REFORM` 이후 날짜에만 쓴다).
+
+    ``etf`` 행은 ETF·ETN 표. 0 이하·NaN 은 NaN.
+    """
+    p = np.asarray(price, dtype=np.float64)
+    t = np.where(
+        np.asarray(etf, dtype=bool), tick_size_array(p, etf=True), tick_size_array(p, etf=False)
+    )
+    return np.round(p / t) * t
+
+
+def _equity_codes(conn: Any, codes: Sequence[str]) -> set[str]:
+    """``codes`` 중 주식 마스터·폐지 목록(:data:`_EQUITY_TABLES`)에 있는 코드.
+
+    나머지는 ETF·ETN 으로 본다 — ``stocks`` 는 주식(KOSPI·KOSDAQ)만 담고 ETF·ETN 이 없다
+    (2026-10 실측: 2024~ ``daily_bars`` 코드 중 세 표 어디에도 없는 것은 069500·229200·278530
+    뿐). 새로 상장해 아직 ``stocks`` 에 없는 주식도 ETF 로 잘못 분류된다(그날 일봉 통합 종가를
+    쓰게 된다).
+    """
+    sel = sorted(set(map(str, codes)))
+    if not sel:
+        return set()
+    lst = code_list(sel)
+    sql = " UNION ".join(f"SELECT code FROM {t} WHERE code IN {lst}" for t in _EQUITY_TABLES)
+    return set(fetch_frame(conn, sql, ("code",), dtypes={"code": str})["code"])
+
+
+def _ca_events(
+    conn: Any, codes: Sequence[str] | None, after: date
+) -> dict[str, tuple[NDArray[Any], NDArray[np.float64]]]:
+    """``corporate_actions`` 의 ``after`` 초과 ``upd_rt ≠ 0`` 사건 → 종목 → (날짜, 계수) 날짜순.
+
+    계수 = ``1 + upd_rt/100`` — 그 날짜 **이전** 가격에 곱하면 새 기준이 된다(quant-airflow
+    ``docs/schema.md``). 같은 날 여러 행은 곱한다.
+    """
+    if codes is not None and not len(codes):
+        return {}
+    sql = (
+        f"SELECT code, date, upd_rt FROM corporate_actions WHERE date > {sql_literal(after)} "
+        "AND upd_rt IS NOT NULL AND upd_rt <> 0"
+    )
+    if codes is not None:
+        sql += f" AND code IN {code_list(sorted(set(codes)))}"
+    df = fetch_frame(
+        conn, sql + " ORDER BY code, date", ("code", "date", "upd_rt"),
+        dtypes={"code": str, "upd_rt": np.float64}, timestamps=("date",),
+    )  # fmt: skip
+    if df.empty:
+        return {}
+    df["f"] = 1.0 + df["upd_rt"].to_numpy(np.float64) / 100.0
+    g = df.groupby(["code", "date"], sort=True)["f"].prod().reset_index()
+    out: dict[str, tuple[NDArray[Any], NDArray[np.float64]]] = {}
+    for code, part in g.groupby("code", sort=False):
+        out[str(code)] = (part["date"].to_numpy("datetime64[D]"), part["f"].to_numpy(np.float64))
+    return out
+
+
+def _snap_retro(
+    obs: Any, codes: Sequence[str], days: Any, events: dict[str, tuple[NDArray[Any], NDArray[Any]]]
+) -> NDArray[np.float64]:
+    """관측 배율(원천 값 / 원주가)을 원천이 소급 반영했을 수 있는 배율로 맞춘다.
+
+    후보 = 1(소급 없음)과, 그날 **뒤** 사건 계수를 앞에서부터 누적 곱한 값들(그 사이 어느 때에
+    재수집됐는지 모르므로). 로그 거리가 가장 가까운 후보가 :data:`_SCALE_TOL` 안이면 그 후보, 아니면
+    NaN(설명 안 되는 어긋남 — 첫 봉 빠짐 같은 잡음이라 그 원천을 버린다).
+    """
+    o = np.asarray(obs, dtype=np.float64)
+    out = np.full(len(o), np.nan)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        lr = np.where((o > 0) & np.isfinite(o), np.log(o), np.nan)
+    d = np.asarray(days).astype("datetime64[D]")
+    ok = np.isfinite(lr)
+    out[ok & (np.abs(lr) <= _SCALE_TOL)] = 1.0
+    for i in np.flatnonzero(ok):
+        ev = events.get(str(codes[i]))
+        if ev is None:
+            continue
+        ed, ef = ev
+        later = ef[ed > d[i]]
+        if not len(later):
+            continue
+        cands = np.r_[1.0, np.cumprod(later)]
+        err = np.abs(lr[i] - np.log(cands))
+        k = int(err.argmin())
+        out[i] = cands[k] if err[k] <= _SCALE_TOL else np.nan
+    return out
+
+
+def _unscale(value: Any, scale: Any, etf: Any) -> NDArray[np.float64]:
+    """소급 배율 ``scale`` 이 곱해져 원 단위로 반올림된 값 → 원 가격(호가 반올림).
+
+    배율이 1 이면 값 그대로. 아니면 ``v = 호가반올림(value/scale)`` 이 ``v × scale`` 반올림으로
+    ``value`` 를 재현하고, 위·아래 한 틱 이웃은 재현하지 **못할** 때만 — 역산이 유일할 때만 —
+    쓴다(아니면 NaN). 저가주(1원 호가) × 0.8 처럼 소급 값의 원 단위 반올림이 원 호가보다 거칠면
+    한 틱 어긋날 수 있어서다(009730 2026-09-23: 1604 / 0.8173 → 1962·1963 둘 다 1604). 계수의
+    소수 둘째 자리 반올림 오차(``upd_rt``)는 상대 1e-4 까지 봐준다.
+    """
+    x = np.asarray(value, dtype=np.float64)
+    s = np.broadcast_to(np.asarray(scale, dtype=np.float64), x.shape)
+    e = np.broadcast_to(np.asarray(etf, dtype=bool), x.shape)
+    out = x.copy()
+    todo = np.flatnonzero(np.isfinite(s) & (s != 1.0))
+    out[~np.isfinite(s)] = np.nan
+    if not len(todo):
+        return out
+    xs, ss, es = x[todo], s[todo], e[todo]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        v = _round_tick(xs / ss, es)
+        tick = np.where(es, tick_size_array(v, etf=True), tick_size_array(v, etf=False))
+        slack = 0.5 + 1e-4 * np.abs(xs) + 1e-9
+
+        def fits(p: NDArray[np.float64]) -> NDArray[np.bool_]:
+            return np.abs(p * ss - xs) <= slack
+
+        good = fits(v) & ~fits(v - tick) & ~fits(v + tick)
+    out[todo] = np.where(good, v, np.nan)
+    return out
+
+
+def _midnight(d: date) -> datetime:
+    return datetime(d.year, d.month, d.day)
+
+
+def _prev_session(conn: Any, day: date) -> date | None:
+    """``day`` 직전 거래일 — ``daily_bars``·``supply_demand``·``minute_bars`` 각각의 ``day`` 전
+    마지막 날 중 가장 늦은 날.
+
+    한 표만 보면 그 표 적재가 실패한 날 이틀 전이 "전 거래일"로 나간다. 세 표가 엇갈리면(어느 표에
+    그날이 없으면) ``RuntimeWarning`` — 그 표에서 오는 원천은 그날 쓰지 못한다. 세 표 모두 늦으면
+    알아챌 수 없다(달력은 관측된 날뿐이다 — :mod:`krx_quant_core.market.calendar`).
+    """
+    lo = day - timedelta(days=_PREV_LOOKBACK_DAYS)
+    lit, lo_lit = sql_literal(day), sql_literal(lo)
+    got = {
+        "daily_bars": _scalar_day(conn, f"SELECT max(date) FROM daily_bars WHERE date < {lit}"),
+        "supply_demand": _scalar_day(
+            conn, f"SELECT max(date) FROM supply_demand WHERE date < {lit} AND date >= {lo_lit}"
+        ),
+        "minute_bars": _scalar_day(
+            conn,
+            f"SELECT max(ts) FROM minute_bars WHERE ts < {sql_literal(_midnight(day))} "
+            f"AND ts >= {sql_literal(_midnight(lo))}",
+        ),
+    }
+    seen = [v for v in got.values() if v is not None]
+    if not seen:
+        return None
+    prev = max(seen)
+    lag = [k for k, v in got.items() if v is not None and v < prev]
+    if lag:
+        warnings.warn(
+            f"base_price({day}): 직전 거래일 {prev} 행이 {', '.join(lag)} 에 없다"
+            "(적재 실패 의심) — 그 표의 원천은 이날 못 쓴다",
+            RuntimeWarning,
+            stacklevel=5,  # _prev_session ← run ← _with_conn ← base_price ← 호출부
+        )
+    return prev
+
+
+#: 하루 분봉 정규장 집계 — 시가 = 첫 봉 시가, 종가 = 15:32 이하 마지막 봉 종가, 고저 = max/min, 양 =
+#: 합. 이식성(Postgres·sqlite)을 위해 ``array_agg`` 대신 첫·끝 봉을 (code, ts) 로 다시 붙인다(PK
+#: 조회).
+_SESSION_SQL = (
+    "SELECT a.code, f.open, a.high, a.low, l.close, a.volume, a.trade_value, a.last_ts FROM "
+    "(SELECT code, min(ts) AS first_ts, max(ts) AS last_ts, max(high) AS high, min(low) AS low, "
+    "sum(volume) AS volume, sum(trade_value) AS trade_value FROM minute_bars WHERE {where} "
+    "GROUP BY code) a "
+    "JOIN minute_bars f ON f.code = a.code AND f.ts = a.first_ts AND {f_span} "
+    "JOIN minute_bars l ON l.code = a.code AND l.ts = a.last_ts AND {l_span} ORDER BY a.code"
+)
+_SESSION_COLUMNS = ("code", "open", "high", "low", "close", "volume", "trade_value", "last_ts")
+
+
+def _session_day(conn: Any, day: date, codes: Sequence[str] | None) -> pd.DataFrame:
+    lo = datetime.combine(day, REGULAR_FIRST_BAR)
+    hi = datetime.combine(day, REGULAR_LAST_BAR)
+    span = "{t}.ts >= " + sql_literal(lo) + " AND {t}.ts <= " + sql_literal(hi)
+    where = span.format(t="minute_bars")
+    if codes is not None:
+        where += f" AND code IN {code_list(codes)}"
+    # 되붙이는 조인에도 같은 시각 범위를 건다 — 없으면 TimescaleDB 가 청크를 못 걸러 전 테이블을
+    # 훑는다(전 종목 하루 50초 넘게 → 범위를 걸면 0.3초).
+    sql = _SESSION_SQL.format(where=where, f_span=span.format(t="f"), l_span=span.format(t="l"))
+    dtypes = {c: np.float64 for c in _SESSION_COLUMNS[1:-1]} | {"code": str}
+    df = fetch_frame(
+        conn, sql, _SESSION_COLUMNS, dtypes=dtypes,
+        timestamps=("last_ts",),
+    )  # fmt: skip
+    df.insert(1, "date", pd.Series(np.datetime64(day, "D"), index=df.index))
+    return df
+
+
+def _session_days(conn: Any, a: date, b: date) -> list[date]:
+    """``[a, b]`` 에서 분봉을 물을 날 — ``daily_bars`` ∪ ``supply_demand`` 에 있는 날(휴장일은
+    빠진다)과, 두 표의 마지막 날 뒤 평일(두 표 적재가 늦어도 분봉이 있는 최근 날을 빠뜨리지
+    않게)."""
+    span = f"date >= {sql_literal(a)} AND date <= {sql_literal(b)}"
+    sql = (
+        f"SELECT DISTINCT date FROM daily_bars WHERE {span} "
+        f"UNION SELECT DISTINCT date FROM supply_demand WHERE {span}"
+    )
+    got = fetch_frame(conn, sql, ("date",), timestamps=("date",))["date"]
+    known = sorted({ts.date() for ts in got})
+    start = known[-1] + timedelta(days=1) if known else a
+    tail = [start + timedelta(days=i) for i in range((b - start).days + 1)]
+    return known + [d for d in tail if d.weekday() < 5]
+
+
+def regular_session_bars(
+    start: date | datetime | str,
+    end: date | datetime | str,
+    *,
+    codes: Sequence[str] | None = None,
+    conn: Any = None,
+) -> pd.DataFrame:
+    """``minute_bars`` 정규장(09:00~15:32 봉) → 일봉
+    ``code``·``date``·:data:`DAILY_COLUMNS`·``last_ts``.
+
+    거래일(:func:`_session_days` — 일봉·수급표에 있는 날, 그 뒤 평일)마다 한 쿼리로 DB 에서
+    집계한다(분봉을 끌어오지 않는다). 시가 = 첫 봉 시가, 종가 = 15:32 이하
+    마지막 봉 종가(연장된 종가 단일가 포함 — swing-it ``krx_session.session_bars_from_minutes`` 와
+    같은 규칙), 고저 = max/min, ``volume`` = 합(주), ``trade_value`` = 합 ÷
+    :data:`TRADE_VALUE_UNIT`(**백만원**, 일봉과 같은 단위). ``last_ts`` = 마지막 봉 시작 시각 —
+    15:30 미만이면 종가 단일가 체결이 없었던(또는 분봉이 끊긴) 종목이다. 분봉이 있는 종목만
+    나온다(하루 ~1,400~2,200 종목, 유동 종목 위주).
+
+    **값은 ``minute_bars`` 그대로다 — 원 가격이라는 보장이 없다.** 과거분 일부는 그 뒤 분할·병합·
+    권리락이 소급된 수정 가격으로 재수집돼 있다(009730 2026-09-22~10-08 × 0.8173 = 10-12 권리락,
+    220100 ~09-16 × 0.8333 = 09-17 권리락; 2025-08~2026-10 종목-일 6.5%). 원 가격이 필요하면
+    ``daily_bars_raw`` 시가와 대조하거나, 그 대조를 하는 :func:`base_price`·:func:`load_daily_bars`
+    ``session="regular"`` 를 쓴다.
+    """
+    if isinstance(codes, str):
+        raise TypeError("codes must be a sequence of codes, not a str (wrap it: [code])")
+    a, b = _as_day(start), _as_day(end)
+    if a > b:
+        raise ValueError("start must be <= end")
+    sel = sorted(set(codes)) if codes is not None else None
+
+    def run(c: Any) -> list[pd.DataFrame]:
+        return [_session_day(c, d, sel) for d in _session_days(c, a, b)]
+
+    frames: list[pd.DataFrame] = [] if sel == [] else _with_conn(conn, run)
+    cols = ("code", "date", *DAILY_COLUMNS, "last_ts")
+    if frames:
+        out = pd.concat(frames, ignore_index=True)
+    else:
+        out = pd.DataFrame({c: pd.Series(dtype=np.float64) for c in cols})
+        out["code"] = out["code"].astype(str)
+        out["last_ts"] = pd.Series(dtype=f"datetime64[{TS_UNIT}]")
+    out["date"] = pd.to_datetime(out["date"]).astype(f"datetime64[{TS_UNIT}]")
+    out["trade_value"] = out["trade_value"].astype(np.float64) / TRADE_VALUE_UNIT
+    return out.loc[:, list(cols)].reset_index(drop=True)
+
+
+def _rows_on(
+    conn: Any, table: str, day: date, cols: Sequence[str], codes: Sequence[str] | None
+) -> pd.DataFrame:
+    """``table`` 의 ``day`` 하루 ``code``·``cols``(모두 NOT NULL). ``table`` 은 이 모듈 상수만."""
+    where = f"date = {sql_literal(day)}" + "".join(f" AND {c} IS NOT NULL" for c in cols)
+    if codes is not None:
+        where += f" AND code IN {code_list(codes)}"
+    sql = f"SELECT code, {', '.join(cols)} FROM {table} WHERE {where} ORDER BY code"
+    dtypes = {c: np.float64 for c in cols} | {"code": str}
+    return fetch_frame(conn, sql, ("code", *cols), dtypes=dtypes)
+
+
+def _scalar_day(conn: Any, sql: str) -> date | None:
+    cur = conn.cursor()
+    try:
+        cur.execute(sql)
+        row = cur.fetchone()
+    finally:
+        cur.close()
+    return None if row is None or row[0] is None else _as_day(str(row[0]))
+
+
+def base_price(
+    day: date | datetime | str,
+    codes: Sequence[str] | None = None,
+    *,
+    conn: Any = None,
+    sources: Sequence[str] = BASE_CLOSE_FROM,
+) -> pd.DataFrame:
+    """``day`` 의 가격제한 기준가(= 전 거래일 **정규장** 종가, 기준가 재산정일은 조정 기준가) 표.
+
+    열: ``code``·``base``·``src``·``prev_date``·``adj``.
+
+    ``market.limits.limit_up_price(base)`` 에 넣을 값이다. 2026-09-14~ 일봉·수급 종가는 애프터마켓이
+    섞여 기준가가 아니다(일봉 종가로 계산한 상한가가 84% 종목-일에서 틀렸다). 원천
+    우선순위(``sources`` — 기본 :data:`BASE_CLOSE_FROM` 전부, 앞이 이긴다):
+
+    1. ``supply_demand_identity`` — ``day`` 의 수급 행 :func:`base_from_change`(호가 격자 반올림).
+       권리락 등 기준가 조정일은 조정 기준가. 장 전에는 아직 없다.
+    2. ``minute_bars`` — 전 거래일 분봉의 15:32 이하 마지막 봉 종가, 그 봉이 15:30~15:32 일
+       때만(종가 단일가). 분봉은 이후 권리 사건이 소급된 값으로 재수집된 날이 있어
+       (:func:`regular_session_bars`) 첫 봉 시가 / ``daily_bars_raw`` 시가 배율을
+       ``corporate_actions`` 누적 계수로 맞춰(:func:`_snap_retro`) 원 가격으로 되돌린다. 원주가
+       시가가 없거나 배율이 설명되지 않거나(첫 봉 빠짐 등) 역산이 유일하지 않거나 종가가 호가가
+       아니면(2026-09 스팩 몇 종목의 분봉 종가 2,073 등) 버린다.
+    3. ``supply_demand``(전일 종가 절댓값) → ``daily_bars_raw`` → ``daily_bars`` — 전 거래일이
+       :data:`AFTERMARKET_START` 이전이거나, 애프터마켓 대상이 아닌 ETF·ETN(주식 마스터·폐지 목록에
+       없는 코드 — :func:`_equity_codes`)일 때만. **``daily_bars`` 는 이후 분할·병합이 소급 반영된
+       값**이라 그 사이 분할이 있으면 틀린다 — ``src`` 로 걸러 쓸 것.
+
+    2·3 은 전일 종가라 ``day`` 가 기준가 재산정일(권리락·병합 등, ``corporate_actions.date ==
+    day``)이면 ``round_tick(종가 × (1 + upd_rt/100))`` 로 조정하고 그 계수를 ``adj`` 에 적는다
+    (조정 없음 = 1.0; 2025-06~2026-09 사건 506건이 수급 항등식과 전부 일치). ``daily_bars`` 는 그
+    사건이 이미 소급됐는지 알 수 없어 그런 날엔 버린다.
+    **장 전에는 그날 사건이 ``corporate_actions`` 에 아직 없을 수 있다**(일봉 백필·원주가 DAG 가
+    채운다) — 그러면 조정 전 값이 나온다(207940 2026-10-02 −0.77%). 2023-01-25 호가 개편 전 날짜의
+    조정은 호가표가 달라 하지 않고 그 행을 버린다.
+
+    전 거래일은 :func:`_prev_session`(일봉·수급표·분봉 중 가장 늦은 날, 엇갈리면 경고). ``codes`` 를
+    주면 그 순서대로 행을 내고 못 찾은 종목은 ``base`` NaN·``src`` None, ``None`` 이면 찾은
+    종목만(코드순).
+    """
+    if isinstance(codes, str):
+        raise TypeError("codes must be a sequence of codes, not a str (wrap it: [code])")
+    bad = [s for s in sources if s not in BASE_CLOSE_FROM]
+    if bad:
+        raise ValueError(f"unknown sources {bad} (choose from {BASE_CLOSE_FROM})")
+    use = [s for s in BASE_CLOSE_FROM if s in set(sources)]
+    d = _as_day(day)
+    sel = sorted(set(codes)) if codes is not None else None
+
+    def part(code: Any, base: Any, src: str, adj: Any = 1.0) -> pd.DataFrame:
+        return pd.DataFrame({"code": np.asarray(code, dtype=object), "src": src,
+                             "base": np.asarray(base, np.float64), "adj": adj})  # fmt: skip
+
+    def run(c: Any) -> tuple[date | None, list[pd.DataFrame]]:
+        if sel == []:
+            return None, []
+        prev = _prev_session(c, d)
+        parts = []
+        if BASE_CLOSE_FROM[0] in use:
+            sd = _rows_on(c, "supply_demand", d, ("close", "flu_rt"), sel)
+            parts.append(part(sd["code"], base_from_change(sd["close"], sd["flu_rt"]), use[0]))
+        if prev is None:
+            return None, parts
+        events = _ca_events(c, sel, prev)
+        prev_parts = []
+        if BASE_CLOSE_FROM[1] in use:
+            ms = _session_day(c, prev, sel)
+            tod = ms["last_ts"] - ms["last_ts"].dt.normalize()
+            cut = pd.Timedelta(hours=REGULAR_CLOSE.hour, minutes=REGULAR_CLOSE.minute)
+            ms = ms[(tod >= cut).to_numpy()].reset_index(drop=True)
+            raw = _rows_on(c, "daily_bars_raw", prev, ("open",), sel)
+            o_r = ms["code"].map(raw.set_index("code")["open"]).to_numpy(np.float64)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                scale = _snap_retro(ms["open"].to_numpy(np.float64) / o_r, list(ms["code"]),
+                                    np.full(len(ms), np.datetime64(prev, "D")), events)  # fmt: skip
+            etf = ~ms["code"].isin(_equity_codes(c, ms["code"])).to_numpy()
+            base = _unscale(ms["close"].to_numpy(np.float64), scale, etf)
+            if prev >= _TICK_REFORM:  # 호가가 아닌 분봉 종가는 버린다(스팩 2,073 vs 기준가 2,070)
+                base[base != _round_tick(base, etf)] = np.nan
+            prev_parts.append(part(ms["code"], base, BASE_CLOSE_FROM[1]))
+        tables = [t for t in BASE_CLOSE_FROM[2:] if t in use]
+        rows = {t: _rows_on(c, t, prev, ("close",), sel) for t in tables}
+        if prev >= AFTERMARKET_START and rows:
+            # 애프터마켓 뒤 전일 종가는 ETF·ETN(애프터마켓 대상 아님)만 정규장 값이다.
+            allc = pd.concat([r["code"] for r in rows.values()], ignore_index=True)
+            equity = _equity_codes(c, allc)
+            rows = {t: r[~r["code"].isin(equity)] for t, r in rows.items()}
+        for t, r in rows.items():
+            prev_parts.append(part(r["code"], r["close"].abs(), t))
+        # 기준가 재산정일 조정. daily_bars 는 그 사건이 이미 소급됐는지 알 수 없어 버린다.
+        for p in prev_parts:
+            if p.empty:
+                continue
+            f = np.ones(len(p))
+            for i, code in enumerate(p["code"]):
+                ev = events.get(str(code))
+                if ev is not None:
+                    on = (ev[0] > np.datetime64(prev, "D")) & (ev[0] <= np.datetime64(d, "D"))
+                    f[i] = float(np.prod(ev[1][on]))
+            hit = f != 1.0
+            if hit.any():
+                b = p["base"].to_numpy(np.float64).copy()
+                if d < _TICK_REFORM or p["src"].iloc[0] == "daily_bars":
+                    b[hit] = np.nan
+                else:
+                    etf = ~p["code"].isin(_equity_codes(c, p["code"][hit])).to_numpy()
+                    b[hit] = _round_tick(b[hit] * f[hit], etf[hit])
+                p["base"] = b
+                p["adj"] = f
+        return prev, parts + prev_parts
+
+    prev, parts = _with_conn(conn, run)
+    if parts:
+        allp = pd.concat(parts, ignore_index=True)
+        allp["code"] = allp["code"].astype(str)
+        allp = allp[np.isfinite(allp["base"].to_numpy(np.float64)) & (allp["base"] > 0)]
+        out = allp.drop_duplicates("code", keep="first").sort_values("code", kind="stable")
+    else:
+        out = pd.DataFrame({"code": pd.Series(dtype=str), "base": pd.Series(dtype=np.float64),
+                            "src": pd.Series(dtype=object),
+                            "adj": pd.Series(dtype=np.float64)})  # fmt: skip
+    out = out.loc[:, ["code", "base", "src", "adj"]]
+    if codes is not None:
+        out = out.set_index("code").reindex(pd.Index(list(codes), name="code")).reset_index()
+    out["base"] = out["base"].astype(np.float64)
+    out["src"] = out["src"].astype(object).where(out["src"].notna(), None)
+    out["prev_date"] = pd.Timestamp(prev) if prev is not None else pd.NaT
+    out["adj"] = out["adj"].astype(np.float64)
+    return out.loc[:, ["code", "base", "src", "prev_date", "adj"]].reset_index(drop=True)
+
+
+def _restore_close(
+    conn: Any, codes: NDArray[Any], days: NDArray[Any], closes: NDArray[np.float64], end: date
+) -> NDArray[np.float64]:
+    """분봉 없는 행의 정규장 종가 = 다음 거래일 수급 항등식 × (행 종가 / 같은 날 수급 종가).
+
+    못 하면 NaN. 다음 거래일이 기준가 재산정일(``corporate_actions`` 사건)이면 항등식이 조정
+    기준가라 쓰지 않는다. 복원값 / 행 종가(같은 날 정규장 종가 / 통합 종가)가 하루 가격제한
+    폭으로 가능한 범위 ``[(1-0.3)/(1+0.3), (1+0.3)/(1-0.3)]`` 밖이어도(빠진 사건) 쓰지 않는다.
+    """
+    out = np.full(len(codes), np.nan)
+    lo = pd.Timestamp(days.min()).date()
+    hi = end + timedelta(days=20)  # 다음 거래일(연휴 포함)이 들어올 만큼
+    span = f"date >= {sql_literal(lo)} AND date <= {sql_literal(hi)}"
+    sessions = fetch_frame(
+        conn, f"SELECT DISTINCT date FROM supply_demand WHERE {span} ORDER BY 1", ("date",),
+        timestamps=("date",),
+    )["date"].to_numpy("datetime64[D]")  # fmt: skip
+    sel = sorted(set(map(str, codes)))
+    sd = fetch_frame(
+        conn,
+        f"SELECT code, date, close, flu_rt FROM supply_demand WHERE {span} "
+        f"AND code IN {code_list(sel)} AND close IS NOT NULL AND flu_rt IS NOT NULL",
+        ("code", "date", "close", "flu_rt"),
+        dtypes={"code": str, "close": np.float64, "flu_rt": np.float64},
+        timestamps=("date",),
+    )
+    if not len(sessions) or not len(sd):
+        return out
+    sd["date"] = sd["date"].to_numpy("datetime64[D]")
+    sd = sd.set_index(["code", "date"])
+    d = np.asarray(days).astype("datetime64[D]")
+    pos = np.searchsorted(sessions, d, side="right")
+    has_next = pos < len(sessions)
+    nxt = np.where(has_next, sessions[np.minimum(pos, len(sessions) - 1)], d)
+    c = np.asarray(codes).astype(str)
+    same = sd.reindex(pd.MultiIndex.from_arrays([c, d]))
+    after = sd.reindex(pd.MultiIndex.from_arrays([c, nxt]))
+    base = base_from_change(after["close"].to_numpy(), after["flu_rt"].to_numpy())
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio = np.abs(closes) / np.abs(same["close"].to_numpy(np.float64))
+        val = base * ratio
+        band = val / np.abs(closes)
+    lo_b, hi_b = (1 - _LIMIT_BAND) / (1 + _LIMIT_BAND), (1 + _LIMIT_BAND) / (1 - _LIMIT_BAND)
+    events = _ca_events(conn, sel, lo)
+    reset = np.array([
+        str(code) in events and bool(np.isin(n, events[str(code)][0]))
+        for code, n in zip(c, nxt, strict=True)
+    ], dtype=bool)  # fmt: skip
+    ok = has_next & np.isfinite(val) & (val > 0) & (band >= lo_b) & (band <= hi_b) & ~reset
+    out[ok] = val[ok]
+    return out
+
+
+def _to_regular(
+    conn: Any, out: pd.DataFrame, a: date, b: date, restrict: bool, raw_table: bool
+) -> pd.DataFrame:
+    """:func:`load_daily_bars` ``session="regular"`` 의 보정(규칙은 그 독스트링)."""
+    n = len(out)
+    regular_ok = np.ones(n, dtype=bool)
+    close_ok = np.ones(n, dtype=bool)
+    idx = np.flatnonzero(out["date"].to_numpy() >= np.datetime64(AFTERMARKET_START))
+    if len(idx):
+        codes = np.asarray(out["code"].to_numpy()[idx]).astype(str)
+        # ETF·ETN 은 애프터마켓 대상이 아니다 — 테이블 값이 정규장 값이다.
+        equity = _equity_codes(conn, np.unique(codes))
+        keep = np.isin(codes, sorted(equity))
+        idx, codes = idx[keep], codes[keep]
+    if len(idx):
+        vals = {col: out[col].to_numpy(np.float64).copy() for col in DAILY_COLUMNS}
+        days = out["date"].to_numpy()[idx]
+        lo = max(a, AFTERMARKET_START)
+        want = sorted(set(codes)) if restrict else None
+        sess = regular_session_bars(lo, b, codes=want, conn=conn)
+        raw = fetch_frame(
+            conn,
+            f"SELECT code, date, open FROM daily_bars_raw WHERE date >= {sql_literal(lo)} "
+            f"AND date <= {sql_literal(b)} AND open IS NOT NULL"
+            + (f" AND code IN {code_list(want)}" if want else ""),
+            ("code", "date", "raw_open"), dtypes={"code": str, "raw_open": np.float64},
+            timestamps=("date",),
+        )  # fmt: skip
+        raw["date"] = raw["date"].astype(f"datetime64[{TS_UNIT}]")
+        m = (
+            pd.DataFrame({"code": codes, "date": days})
+            .merge(sess, on=["code", "date"], how="left")
+            .merge(raw, on=["code", "date"], how="left")
+        )
+        o_t = np.abs(vals["open"][idx])
+        o_m = m["open"].to_numpy(np.float64)
+        o_r = np.abs(m["raw_open"].to_numpy(np.float64))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            # 테이블 / 원주가 = 테이블의 소급·수정 배율
+            kt = np.where((o_t > 0) & (o_r > 0), o_t / o_r, np.nan)
+            scale = _snap_retro(o_m / o_r, codes, days, _ca_events(conn, want, lo - timedelta(1)))
+        # 분봉이 소급 값이면(scale ≠ 1) 원 단위 반올림 탓에 정확히 못 되돌린다 — 분봉 없는 행처럼.
+        # 호가가 아닌 분봉 종가(스팩 2,073 등 — 기준가 2,070)도 종가 단일가가 아니라 버린다.
+        m_close = m["close"].to_numpy(np.float64)
+        hit = np.isfinite(kt) & (scale == 1.0) & (m_close == _round_tick(m_close))
+        j, f = idx[hit], kt[hit]
+        for col in ("high", "low", "close"):
+            vals[col][j] = m[col].to_numpy(np.float64)[hit] * f
+        vals["volume"][j] = m["volume"].to_numpy(np.float64)[hit] / f
+        vals["trade_value"][j] = m["trade_value"].to_numpy(np.float64)[hit]
+        if raw_table:
+            # daily_bars 가 이후 분할로 소급된 행(f ≠ 1)은 테이블처럼 원 단위 정수로.
+            r = j[f != 1.0]
+            for col in ("high", "low", "close", "volume"):
+                vals[col][r] = np.round(vals[col][r])
+        miss = idx[~hit]
+        regular_ok[miss] = False
+        close_ok[miss] = False
+        if len(miss):
+            rc = _restore_close(
+                conn, codes[~hit], days[~hit], vals["close"][miss], b
+            )
+            got = np.isfinite(rc)
+            if raw_table:
+                rc = np.round(rc)  # 소급된 daily_bars 행은 기준가 × 배율이 정수가 아니다
+            vals["close"][miss[got]] = rc[got]
+            close_ok[miss[got]] = True
+        for col in ("high", "low", "close", "volume", "trade_value"):
+            out[col] = vals[col]
+    out["regular_ok"] = regular_ok
+    out["close_ok"] = close_ok
     return out
 
 
