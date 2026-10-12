@@ -69,3 +69,25 @@ def test_copy_path_matches_read_sql(driver, day):
         np.testing.assert_array_equal(mb.frame(code)["close"].to_numpy(), rm["close"].to_numpy())
     finally:
         conn.close()
+
+
+def test_regular_session_005930_2026_10_08():
+    """애프터마켓 오염 실례: 005930 2026-10-08 통합 종가 263,000, 정규장(15:32 봉) 262,000."""
+    conn = D.connect()
+    try:
+        d = date(2026, 10, 8)
+        kw = {"adjusted": False, "codes": ["005930"], "conn": conn, "store": False}
+        allb = D.load_daily_bars(d, d, **kw)
+        reg = D.load_daily_bars(d, d, session="regular", **kw)
+        assert allb["close"].iloc[0] == 263000
+        assert reg["close"].iloc[0] == 262000 and bool(reg["regular_ok"].iloc[0])
+        mb = D.load_minute_bars(d, conn=conn, store=False, codes=["005930"], session="regular")
+        assert mb.get("005930")["close"][-1] == 262000
+        assert mb.get("005930")["sec"].max() <= 15 * 3600 + 32 * 60
+        bp = D.base_price(date(2026, 10, 12), ["005930"], conn=conn)
+        assert bp["base"].iloc[0] == 262000 and bp["src"].iloc[0] == "supply_demand_identity"
+        # 분할 전 원 종가(daily_bars.close 는 소급 수정 41,200)
+        old = D.base_price(date(2017, 4, 3), ["005930"], conn=conn)
+        assert old["base"].iloc[0] == 2060000
+    finally:
+        conn.close()

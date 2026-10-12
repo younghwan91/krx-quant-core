@@ -23,7 +23,8 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Any
+from datetime import time as dtime
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -38,12 +39,15 @@ __all__ = [
     "DatasetSpec",
     "MINUTE_BARS",
     "QUOTES",
+    "REGULAR_FIRST_BAR",
+    "REGULAR_LAST_BAR",
     "TICKS",
     "is_closed_day",
     "load_day",
     "load_minute_bars",
     "load_quotes",
     "load_ticks",
+    "regular_session",
 ]
 
 
@@ -94,6 +98,18 @@ MINUTE_BARS = DatasetSpec(
         ("volume", "int64"), ("trade_value", "float64"),
     ),
 )  # fmt: skip
+
+
+#: 정규장 첫 분봉(시가 단일가 09:00 체결이 찍히는 봉).
+REGULAR_FIRST_BAR = dtime(9, 0)
+#: 정규장 마지막 분봉(봉 시작 시각, **포함**). 15:30 종가 단일가는 보통 15:30 봉, 변동성 완화장치로
+#: 연장되면 15:32 봉에 찍힌다(swing-it ``krx_session.SESSION_CLOSE``). 그 뒤(15:35~ 장후 시간외,
+#: 2026-09-14~ 16:00~19:59 애프터마켓)는 정규장이 아니다.
+REGULAR_LAST_BAR = dtime(15, 32)
+
+
+def _sec(t: dtime) -> int:
+    return t.hour * 3600 + t.minute * 60 + t.second
 
 
 #: pandas 가 파이썬 datetime 을 받을 때 쓰는 단위(3.x ``us``, 2.x ``ns``) — ``read_sql`` 과 같게.
@@ -403,6 +419,32 @@ def load_quotes(day: date, *, levels: int = 10, **kwargs: Any) -> CodeDay:
     return load_day(QUOTES, day, **kwargs)
 
 
-def load_minute_bars(day: date, **kwargs: Any) -> CodeDay:
-    """하루치 분봉(:data:`MINUTE_BARS`). ``sec`` 는 분 시작 시각(초)."""
-    return load_day(MINUTE_BARS, day, **kwargs)
+def regular_session(bars: CodeDay) -> CodeDay:
+    """정규장 봉만 — ``sec`` 가 09:00~15:32(양 끝 포함, :data:`REGULAR_LAST_BAR`)인 행.
+
+    2026-09-14 부터 ``minute_bars`` 에 16:00~19:59 애프터마켓 봉(키움 KRX+NXT 통합)이 섞였다 —
+    그대로 모으면 고가·저가·종가·거래량이 정규장 값이 아니다. 행은 복사된다(종목
+    순서·``dataset``·``day`` 유지).
+    """
+    sec = np.asarray(bars.cols["sec"])
+    keep = (sec >= _sec(REGULAR_FIRST_BAR)) & (sec <= _sec(REGULAR_LAST_BAR))
+    cs = np.r_[0, np.cumsum(keep, dtype=np.int64)]
+    ptr = cs[np.asarray(bars.ptr, np.int64)]  # 종목 경계를 남은 행 기준으로 옮긴다
+    cols = {k: np.asarray(v)[keep] for k, v in bars.cols.items()}
+    return CodeDay(bars.dataset, bars.day, np.asarray(bars.codes), ptr, cols)
+
+
+def load_minute_bars(
+    day: date, *, session: Literal["all", "regular"] = "all", **kwargs: Any
+) -> CodeDay:
+    """하루치 분봉(:data:`MINUTE_BARS`). ``sec`` 는 분 시작 시각(초).
+
+    Args:
+        session: ``"all"``(기본 — 테이블 그대로, 2026-09-14~ 애프터마켓 봉 포함) 또는 ``"regular"``
+            (:func:`regular_session` — 09:00~15:32 봉만). 캐시는 어느 쪽이든 하루 전체를 저장한다.
+        **kwargs: :func:`load_day`.
+    """
+    if session not in ("all", "regular"):
+        raise ValueError("session must be 'all' or 'regular'")
+    out = load_day(MINUTE_BARS, day, **kwargs)
+    return regular_session(out) if session == "regular" else out

@@ -406,6 +406,29 @@ simnode 실측(2026-10-07 하루, 콜드 → 웜): 틱 190만 행 5.4s → **1ms
 `frame()` 은 정수열을 int64 로 올려 `read_sql` 과 같은 의미다 — 배열(`get()`)을 직접 곱할 땐 먼저
 `astype(np.int64)`(int32 × int32 는 넘친다).
 
+### KRX 데이터 함정 방어 (main, 미릴리스 — 옵트인, 기본 출력 불변)
+
+2026-09-14(`AFTERMARKET_START`)부터 KRX 애프터마켓(16:00~20:00)이 키움 일봉·분봉·수급 종가에 섞였다 —
+`daily_bars(_adjusted)` 의 고가·저가·종가·거래량·거래대금이 정규장 값이 아니다(시가는 정상). 다음 날 가격제한
+기준가는 **정규장** 종가다. `daily_bars.close`(`adjusted=False`)도 원 종가가 아니다(분할·병합 소급).
+
+```python
+mb = D.load_minute_bars(date(2026, 10, 8), session="regular")    # 09:00~15:32 봉만 (= D.regular_session(mb_all))
+bars = D.load_daily_bars("2026-09-01", "2026-10-12", session="regular")  # 09-14~ 행을 분봉 정규장 집계로
+bars[~bars.regular_ok]        # 분봉 없는 행(고저·양은 테이블 값). close_ok 면 종가만 다음날 수급 항등식으로 복원
+sess = D.regular_session_bars("2026-10-08", "2026-10-08")         # 분봉 정규장 일봉(DB 집계, 원 가격)
+bp = D.base_price(date(2026, 10, 12), ["005930"])                 # base 262,000 (일봉 종가 263,000)
+limit_up_price(bp.base[0])                                       # 340,500 — 일봉 종가로는 341,500
+D.base_from_change(close, flu_rt)     # 수급 (종가, 등락률×100) → 그날 기준가, 호가 격자 반올림
+D.TRADE_VALUE_UNIT                    # 1_000_000 — 일봉 trade_value 는 백만원
+```
+
+`base_price` 우선순위(`BASE_CLOSE_FROM`): 그날 수급 항등식 `close/(1+flu_rt/1e4)` → 전일 분봉 15:30~15:32 봉 →
+(전일이 09-14 이전만) 수급 종가 → `daily_bars_raw` → `daily_bars`(분할 소급 — `src` 로 거를 것). 실측: 항등식 =
+전일 분봉 종가 단일가 99.984%(09-15~10-12 25,250 종목-일, 불일치 4건은 기준가 조정일로 보임 — 개별 확인 안 함), 개편 전(2019·2021·2022)
+= 전일 수급 종가 99.87~100%(불일치는 조정 기준가로 보이는 큰 차이). `session="regular"` 9-14~10-12 전 종목: `regular_ok`
+59.8%, `close_ok` 97.2%(마지막 날은 다음날 수급이 없어 복원 불가), 분봉 하루 집계 0.3s.
+
 같은 판에 들어간 가속(전부 **값 동일** — 원본·정본 대조 테스트):
 
 | 무엇 | 전 → 후 |
