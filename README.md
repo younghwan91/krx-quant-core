@@ -1,5 +1,9 @@
 # krx-quant-core
 
+[![CI](https://github.com/younghwan91/krx-quant-core/actions/workflows/ci.yml/badge.svg)](https://github.com/younghwan91/krx-quant-core/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
+
 **한국 주식(KOSPI·KOSDAQ) 퀀트 공통 코어.** 호가단위·가격제한폭·세션 규칙, 일자별
 증권거래세 비용모델, 키움 주문 가드, DART 중대공시 분류, 킬스위치, 체결 시뮬레이션,
 Deflated Sharpe·purged CV 검증 통계를 한 패키지로 묶었다.
@@ -203,7 +207,7 @@ with start_run("scalp84-flow", config, repo_root=ROOT,
 - OOS: `kqc oos define` → `kqc prereg lock` → `start_run(..., final=True)` 는 label 당 **한 번**.
 
 ```bash
-kqc run scalp-it -- uv run python scripts/x.py   # trader 에서: 푸시된 sha 를 simnode worktree 에서 실행
+kqc run scalp-it -- uv run python scripts/x.py   # 푸시된 sha 를 simnode worktree 에서 실행
 kqc runs ls scalp84-flow --repo-root ~/git/scalp-it
 ```
 
@@ -585,3 +589,11 @@ uv run ruff check src tests
 ## 라이선스
 
 Apache-2.0
+
+## ⭐ 도움이 되셨다면 (Star)
+
+이 라이브러리가 유용했다면 우측 상단 **[⭐ Star](https://github.com/younghwan91/krx-quant-core)** 를 눌러주세요. 검색·추천 노출이 올라가 더 많은 개발자/연구자가 찾을 수 있습니다.
+
+- 🐛 버그·질문·기능 제안 → [Issues](https://github.com/younghwan91/krx-quant-core/issues)
+- 👤 만든 사람 → **채영환 (Younghwan Chae)** · [GitHub @younghwan91](https://github.com/younghwan91) · [LinkedIn](https://www.linkedin.com/in/younghwan-chae/)
+- 🌐 전체 오픈소스 퀀트 스택은 [프로필](https://github.com/younghwan91)에서 볼 수 있습니다.
