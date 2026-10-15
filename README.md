@@ -3,6 +3,9 @@
 [![CI](https://github.com/younghwan91/krx-quant-core/actions/workflows/ci.yml/badge.svg)](https://github.com/younghwan91/krx-quant-core/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
+[![GitHub stars](https://img.shields.io/github/stars/younghwan91/krx-quant-core?style=social)](https://github.com/younghwan91/krx-quant-core)
+[![GitHub forks](https://img.shields.io/github/forks/younghwan91/krx-quant-core?style=social)](https://github.com/younghwan91/krx-quant-core)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-younghwan--chae-0A66C2?logo=linkedin&logoColor=white)](https://www.linkedin.com/in/younghwan-chae/)
 
 **한국 주식(KOSPI·KOSDAQ) 퀀트 공통 코어.** 호가단위·가격제한폭·세션 규칙, 일자별
 증권거래세 비용모델, 키움 주문 가드, DART 중대공시 분류, 킬스위치, 체결 시뮬레이션,
@@ -590,10 +593,13 @@ uv run ruff check src tests
 
 Apache-2.0
 
-## ⭐ 도움이 되셨다면 (Star)
+## ⭐ 도움이 되셨다면 (Star & 기여)
 
-이 라이브러리가 유용했다면 우측 상단 **[⭐ Star](https://github.com/younghwan91/krx-quant-core)** 를 눌러주세요. 검색·추천 노출이 올라가 더 많은 개발자/연구자가 찾을 수 있습니다.
+[![Star History Chart](https://api.star-history.com/svg?repos=younghwan91/krx-quant-core&type=Date)](https://star-history.com/#younghwan91/krx-quant-core&Date)
 
-- 🐛 버그·질문·기능 제안 → [Issues](https://github.com/younghwan91/krx-quant-core/issues)
-- 👤 만든 사람 → **채영환 (Younghwan Chae)** · [GitHub @younghwan91](https://github.com/younghwan91) · [LinkedIn](https://www.linkedin.com/in/younghwan-chae/)
-- 🌐 전체 오픈소스 퀀트 스택은 [프로필](https://github.com/younghwan91)에서 볼 수 있습니다.
+`krx-quant-core`가 연구나 퀀트 시스템 구축에 유용하셨다면 우측 상단의 **[⭐ Star](https://github.com/younghwan91/krx-quant-core)** 를 눌러주세요!
+- KOSPI/KOSDAQ 시장 규칙, 비대칭 가격제한폭, 일자별 증권거래세, Deflated Sharpe 등 현실적인 한국 퀀트 코어를 발전시키는 데 큰 힘이 됩니다.
+- 🐛 버그 제보 & 질문 & 기능 제안: [GitHub Issues](https://github.com/younghwan91/krx-quant-core/issues)
+- 🔧 PR 및 오픈소스 기여 환영
+- 👤 만든 사람: **채영환 (Younghwan Chae)** · [GitHub @younghwan91](https://github.com/younghwan91) · [LinkedIn](https://www.linkedin.com/in/younghwan-chae/)
+- 🌐 전체 오픈소스 퀀트 스택은 [프로필](https://github.com/younghwan91)에서 한눈에 볼 수 있습니다.
