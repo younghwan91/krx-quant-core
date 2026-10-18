@@ -5,6 +5,11 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-younghwan--chae-0A66C2?logo=linkedin&logoColor=white)](https://www.linkedin.com/in/younghwan-chae/)
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.png">
+  <img alt="KRX 상한가·하한가는 대칭이 아니다 — 기준가 1천~100만원 구간에서 호가단위 절사가 ±30% 를 비트는 폭과, 시행일별 증권거래세 계단" src="docs/images/hero-light.png" width="100%">
+</picture>
+
 **한국 주식(KOSPI·KOSDAQ) 퀀트 공통 코어.** 호가단위·가격제한폭·세션 규칙, 일자별
 증권거래세 비용모델, 키움 주문 가드, DART 중대공시 분류, 킬스위치, 체결 시뮬레이션,
 Deflated Sharpe·purged CV 검증 통계를 한 패키지로 묶었다.
