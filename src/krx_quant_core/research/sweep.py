@@ -46,7 +46,7 @@ import pandas as pd
 from krx_quant_core.runtime.gitstate import git_dirty, git_head, resolve_trials_dir
 from krx_quant_core.runtime.runs import DataSpec, start_run
 from krx_quant_core.stats.sharpe import deflated_sharpe_from_sample
-from krx_quant_core.stats.trials import config_fingerprint, count_trials, record_trial
+from krx_quant_core.stats.trials import config_fingerprint, count_trials, record_trials
 
 __all__ = ["SweepResult", "grid", "run_sweep"]
 
@@ -242,8 +242,7 @@ def run_sweep(
         allow_dirty=allow_dirty,
         trials_dir=trials_dir,
     ) as run:
-        for cfg in configs:
-            record_trial(label, cfg, logs_dir=logs_dir)
+        record_trials(label, configs, logs_dir=logs_dir)
 
         git_sha = git_head(repo_root)
         if n_jobs == 1 or len(configs) <= 1:

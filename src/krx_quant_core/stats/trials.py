@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,7 @@ __all__ = [
     "ledger_path",
     "read_trials",
     "record_trial",
+    "record_trials",
 ]
 
 LEDGER_NAME = "TRIALS.jsonl"
@@ -50,17 +52,38 @@ def config_fingerprint(config: dict) -> str:
 def record_trial(label: str, config: dict, *, logs_dir: Path | str,
                  note: str | None = None) -> str:
     """config 를 원장에 append 하고 지문을 반환. 같은 지문이 이미 있으면 다시 안 적는다."""
-    fp = config_fingerprint(config)
+    return record_trials(label, [config], logs_dir=logs_dir, note=note)[0]
+
+
+def record_trials(
+    label: str,
+    configs: Sequence[dict],
+    *,
+    logs_dir: Path | str,
+    note: str | None = None,
+) -> list[str]:
+    """여러 config 를 원장에 한 번에 append 하고 각 지문 목록을 순서대로 반환한다."""
+    if not configs:
+        return []
     path = ledger_path(label, logs_dir=logs_dir)
-    if fp in _fingerprints(path):
-        return fp
-    path.parent.mkdir(parents=True, exist_ok=True)
-    row: dict[str, Any] = {"fingerprint": fp, "config": config}
-    if note:
-        row["note"] = note
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n")
-    return fp
+    seen = _fingerprints(path)
+    fps: list[str] = []
+    lines: list[str] = []
+    for cfg in configs:
+        fp = config_fingerprint(cfg)
+        fps.append(fp)
+        if fp in seen:
+            continue
+        seen.add(fp)
+        row: dict[str, Any] = {"fingerprint": fp, "config": cfg}
+        if note:
+            row["note"] = note
+        lines.append(json.dumps(row, sort_keys=True, ensure_ascii=False) + "\n")
+    if lines:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.writelines(lines)
+    return fps
 
 
 def _fingerprints(path: Path) -> set[str]:

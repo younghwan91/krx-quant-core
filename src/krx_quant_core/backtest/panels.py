@@ -48,6 +48,13 @@ def adv_panel(prices: pd.DataFrame, *, window: int = 20) -> pd.DataFrame:
     tv = prices[["code", "date", "trade_value"]].copy()
     tv["trade_value"] = tv["trade_value"].abs()
     tv = tv.sort_values(["code", "date"])
-    tv["adv"] = tv.groupby("code")["trade_value"].transform(
-        lambda s: s.rolling(window, min_periods=window).mean())
+    # 원래 transform 처럼 위치로 맞춘다 — 인덱스가 겹치거나 code 가 NaN 인 행(→ NaN)도 같게.
+    tv = tv.reset_index(drop=True)
+    tv["adv"] = (
+        tv.groupby("code", sort=False)["trade_value"]
+        .rolling(window, min_periods=window)
+        .mean()
+        .reset_index(level=0, drop=True)
+        .reindex(tv.index)
+    )
     return tv.dropna(subset=["adv"])[["code", "date", "adv"]].reset_index(drop=True)
