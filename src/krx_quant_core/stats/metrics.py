@@ -192,13 +192,29 @@ def paired_bootstrap(
                 "prob_a_better_sharpe": float("nan"), "n": n}
     rng = np.random.default_rng(seed)
     n_blocks = int(np.ceil(n / block))
+    starts = np.empty((n_boot, n_blocks), dtype=np.int64)
+    for i in range(n_boot):
+        starts[i] = rng.integers(0, n - block + 1, size=n_blocks)
+    sqrt_ppy = np.sqrt(ppy)
+    offs = np.arange(block)
     d_sharpe = np.empty(n_boot)
     d_cagr = np.empty(n_boot)
-    for i in range(n_boot):
-        starts = rng.integers(0, n - block + 1, size=n_blocks)
-        idx = np.concatenate([np.arange(s, s + block) for s in starts])[:n]
-        d_sharpe[i] = ann_sharpe(a[idx], ppy) - ann_sharpe(b[idx], ppy)
-        d_cagr[i] = cagr(a[idx], ppy) - cagr(b[idx], ppy)
+    # 회차마다 독립 계산이라 덩어리로 나눠도 숫자는 같다 — 임시 배열을 ~32MB 로 묶는다.
+    step = max(1, (1 << 22) // max(n, 1))
+    for lo in range(0, n_boot, step):
+        hi = min(lo + step, n_boot)
+        idx = (starts[lo:hi, :, None] + offs).reshape(hi - lo, -1)[:, :n]
+        ab = a[idx]
+        bb = b[idx]
+        sa_std = ab.std(axis=1)
+        sb_std = bb.std(axis=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            sa = np.where(sa_std >= 1e-12, ab.mean(axis=1) / sa_std * sqrt_ppy, np.nan)
+            sb = np.where(sb_std >= 1e-12, bb.mean(axis=1) / sb_std * sqrt_ppy, np.nan)
+            d_sharpe[lo:hi] = sa - sb
+        # CAGR 은 원래처럼 행마다 cagr() 로 낸다. prod(axis=1)·배열 ** 는 CPU 의 SIMD 경로
+        # (AVX-512 의 곱 축약·SVML pow)에 따라 끝자리가 원본과 어긋났다(CI test-no-numba).
+        d_cagr[lo:hi] = [cagr(ra, ppy) - cagr(rb, ppy) for ra, rb in zip(ab, bb, strict=True)]
     ds = d_sharpe[np.isfinite(d_sharpe)]
     dc = d_cagr[np.isfinite(d_cagr)]
     nan2 = (float("nan"), float("nan"))

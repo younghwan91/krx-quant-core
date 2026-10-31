@@ -123,16 +123,15 @@ def rank_buckets(
     ``value`` 는 **전일** 정보(예: 전일 거래대금)여야 한다 — 당일 값이면 look-ahead 다. 그 책임은
     호출부에 있고 여기선 열 이름을 받을 뿐이다. 값이 NaN 인 행은 NaN 버킷.
     """
-    def _bucket(s: pd.Series) -> pd.Series:
-        r = s.rank(method="first", ascending=ascending)
-        k = s.notna().sum()
-        if k == 0:
-            return pd.Series(np.nan, index=s.index)
-        b = np.floor((r - 1) * n / k)  # r=1 → 0(상위), r=k → n−1(하위); k=1 이면 0
-        return b.clip(lower=0, upper=n - 1)
-
-    b = frame.groupby(date_col, sort=False, group_keys=False)[value].apply(_bucket)
-    b = b.reindex(frame.index)
+    if frame.empty:
+        b = pd.Series(dtype=float, index=frame.index, name=value)
+    else:
+        g = frame.groupby(date_col, sort=False)[value]
+        r = g.rank(method="first", ascending=ascending)
+        k = g.transform("count")
+        with np.errstate(divide="ignore", invalid="ignore"):
+            b = np.floor((r - 1) * n / k.where(k > 0, np.nan)).clip(lower=0, upper=n - 1)
+        b = b.astype("float64")  # nullable(Float64) 입력이어도 원래처럼 float64·NaN 으로 낸다
     if labels is not None:
         if len(labels) != n:
             raise ValueError(f"labels 길이 {len(labels)} ≠ n {n}")

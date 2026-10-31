@@ -22,6 +22,7 @@ from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from krx_quant_core.costs.model import KoreanCostModel
@@ -82,7 +83,44 @@ def _frame_events(df: pd.DataFrame | None, cls: type) -> list[Event]:
         if not (pd.api.types.is_object_dtype(dtype) or isinstance(dtype, pd.StringDtype)):
             # 숫자로 읽힌 종목코드는 앞자리 0 이 이미 사라졌다(005930 → 5930).
             raise ValueError(f"{kind} code 열이 문자열이 아니다({dtype}) — 앞자리 0 유실")
-    names = [f.name for f in fields(cls) if f.name in df.columns]
+    if df.empty:
+        return []
+    all_fields = [f.name for f in fields(cls)]
+    names = [name for name in all_fields if name in df.columns]
+    numeric = [n for n in names if n not in ("ts", "code")]
+    # 빠른 길은 원래 행 단위 변환과 결과가 같다고 증명된 입력에만 쓴다: 열 이름이 겹치지 않고
+    # 숫자 열이 numpy 정수/실수형일 때. object·nullable 열(None/pd.NA)은 원래대로 float() 가
+    # 예외를 내야 하므로 행 단위 경로로 보낸다.
+    if df.columns.duplicated().any() or not all(
+        isinstance(df[n].dtype, np.dtype) and df[n].dtype.kind in "iuf" for n in numeric
+    ):
+        return _frame_events_rows(df, cls, names)
+    cols = []
+    for name in names:
+        s = df[name]
+        if name == "ts":
+            if pd.api.types.is_datetime64_any_dtype(s.dtype):
+                if s.dt.tz is None:
+                    s = s.dt.tz_localize(KST)
+                cols.append([t.to_pydatetime() for t in s])
+            else:
+                cols.append(
+                    [
+                        (t if t.tzinfo is not None else t.tz_localize(KST)).to_pydatetime()
+                        for t in (pd.Timestamp(v) for v in s)
+                    ]
+                )
+        elif name == "code":
+            cols.append([str(v) for v in s])
+        else:
+            cols.append(s.to_numpy(dtype=float, copy=False).tolist())
+    if names == all_fields:
+        return [cls(*row) for row in zip(*cols, strict=True)]
+    return [cls(**dict(zip(names, row, strict=True))) for row in zip(*cols, strict=True)]
+
+
+def _frame_events_rows(df: pd.DataFrame, cls: type, names: list[str]) -> list[Event]:
+    """행 단위 원래 변환. 빠른 길이 같은 결과를 보장하지 못하는 입력용."""
     out: list[Event] = []
     for row in df[names].to_dict("records"):
         kw = {}

@@ -15,16 +15,33 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from numpy.lib.stride_tricks import sliding_window_view
 
+from .._jit import njit
 from ..stats.metrics import newey_west_t, summarize_periods
 
 __all__ = ["rank_ic", "rank_tilt_backtest", "staggered_tranche_backtest"]
 
 
+@njit
+def _ffill_axis1_nb(C: np.ndarray) -> np.ndarray:
+    nC, nD = C.shape
+    out = np.empty((nC, nD), dtype=np.float64)
+    for i in range(nC):
+        last = np.nan
+        for j in range(nD):
+            v = C[i, j]
+            if not np.isnan(v):
+                last = v
+            out[i, j] = last
+    return out
+
+
 def _trailing_adv(V: np.ndarray, nD: int, adv_window: int, like: np.ndarray) -> np.ndarray:
     adv = np.full_like(like, np.nan)
-    for j in range(adv_window, nD):
-        adv[:, j] = np.nanmean(V[:, j - adv_window:j], axis=1)
+    if adv_window > 0 and nD > adv_window:
+        w = sliding_window_view(V[:, : nD - 1], adv_window, axis=1)
+        adv[:, adv_window:nD] = np.nanmean(w, axis=2)
     return adv
 
 
@@ -171,7 +188,7 @@ def staggered_tranche_backtest(
     capm = cap_array
 
     # 폐지 청산가: 각 시점까지의 마지막 관측 종가(행 방향 forward-fill). 꺼져 있으면 안 만든다.
-    C_ff = pd.DataFrame(C).ffill(axis=1).to_numpy(float) if delisting_exit else None
+    C_ff = _ffill_axis1_nb(np.asarray(C, dtype=np.float64)) if delisting_exit else None
 
     # eligible/book 은 t 의 순수함수라 메모이즈해도 숫자가 안 바뀐다. 스태거링이 지난
     # 리밸런스일을 다시 부르므로, 캐시가 없으면 같은 날 전유니버스 스캔이 트랜치 수만큼 반복된다.

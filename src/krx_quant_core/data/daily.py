@@ -692,11 +692,14 @@ def base_price(
             if p.empty:
                 continue
             f = np.ones(len(p))
-            for i, code in enumerate(p["code"]):
-                ev = events.get(str(code))
-                if ev is not None:
-                    on = (ev[0] > np.datetime64(prev, "D")) & (ev[0] <= np.datetime64(d, "D"))
-                    f[i] = float(np.prod(ev[1][on]))
+            if events:
+                p_codes = p["code"].astype(str).to_numpy()
+                prev_dt, d_dt = np.datetime64(prev, "D"), np.datetime64(d, "D")
+                for i in np.flatnonzero(np.isin(p_codes, list(events))):
+                    ev = events[p_codes[i]]
+                    on = (ev[0] > prev_dt) & (ev[0] <= d_dt)
+                    if on.any():
+                        f[i] = float(np.prod(ev[1][on]))
             hit = f != 1.0
             if hit.any():
                 b = p["base"].to_numpy(np.float64).copy()
@@ -773,10 +776,10 @@ def _restore_close(
         band = val / np.abs(closes)
     lo_b, hi_b = (1 - _LIMIT_BAND) / (1 + _LIMIT_BAND), (1 + _LIMIT_BAND) / (1 - _LIMIT_BAND)
     events = _ca_events(conn, sel, lo)
-    reset = np.array([
-        str(code) in events and bool(np.isin(n, events[str(code)][0]))
-        for code, n in zip(c, nxt, strict=True)
-    ], dtype=bool)  # fmt: skip
+    reset = np.zeros(len(c), dtype=bool)
+    if events:
+        for i in np.flatnonzero(np.isin(c, list(events))):
+            reset[i] = bool(np.isin(nxt[i], events[str(c[i])][0]))
     ok = has_next & np.isfinite(val) & (val > 0) & (band >= lo_b) & (band <= hi_b) & ~reset
     out[ok] = val[ok]
     return out
