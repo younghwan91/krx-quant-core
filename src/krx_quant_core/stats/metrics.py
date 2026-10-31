@@ -212,10 +212,9 @@ def paired_bootstrap(
             sa = np.where(sa_std >= 1e-12, ab.mean(axis=1) / sa_std * sqrt_ppy, np.nan)
             sb = np.where(sb_std >= 1e-12, bb.mean(axis=1) / sb_std * sqrt_ppy, np.nan)
             d_sharpe[lo:hi] = sa - sb
-            d_cagr[lo:hi] = (
-                (1.0 + ab).prod(axis=1) ** (ppy / n) - 1.0
-                - ((1.0 + bb).prod(axis=1) ** (ppy / n) - 1.0)
-            )
+        # CAGR 은 원래처럼 행마다 cagr() 로 낸다. prod(axis=1)·배열 ** 는 CPU 의 SIMD 경로
+        # (AVX-512 의 곱 축약·SVML pow)에 따라 끝자리가 원본과 어긋났다(CI test-no-numba).
+        d_cagr[lo:hi] = [cagr(ra, ppy) - cagr(rb, ppy) for ra, rb in zip(ab, bb, strict=True)]
     ds = d_sharpe[np.isfinite(d_sharpe)]
     dc = d_cagr[np.isfinite(d_cagr)]
     nan2 = (float("nan"), float("nan"))
