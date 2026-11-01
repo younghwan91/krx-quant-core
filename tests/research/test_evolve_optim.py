@@ -146,13 +146,16 @@ def test_fast_cmawm_bit_identical_to_library():
 
 
 def test_patch_restores_library_globals():
-    from cmaes import _cmawm, _stats
+    from cmaes import _cmawm
+    # 패치 전 값과 비교한다 — scipy 가 깔린 환경(예: [portfolio] 의 cvxpy 가 끌고 온다)에서는
+    # 라이브러리 전역이 처음부터 scipy 판이라 `_stats.chi2_ppf` 와 같지 않다.
+    before = (_cmawm.chi2_ppf, getattr(_cmawm, "norm_cdf", None))
     sp = _space()
     opt = FastCMAwM(mean=np.full(sp.dim, 0.5).clip(sp.bounds[:, 0], sp.bounds[:, 1]), sigma=0.3,
                     bounds=sp.bounds, steps=sp.steps, seed=0)
     XE, XT = opt.ask_batch(opt.population_size)
     opt.tell([(t, 0.0) for t in XT])
-    assert _cmawm.chi2_ppf is _stats.chi2_ppf
+    assert (_cmawm.chi2_ppf, getattr(_cmawm, "norm_cdf", None)) == before
 
 
 @pytest.mark.parametrize("backend", ["cmawm", "cmawm_lib"])

@@ -26,6 +26,7 @@ from .fragility import (
     tail_removal,
     win_conditional,
 )
+from .ic import ic_decay, rolling_ic, signal_turnover
 from .matched_null import (
     MatchedAlpha,
     cluster_bootstrap_ci,
@@ -74,6 +75,7 @@ __all__ = [
     "matched_alpha",
     "matched_control",
     "selection_bias_report",
+    "signal_turnover",
     "PPY",
     "Fold",
     "FoldMask",
@@ -89,6 +91,7 @@ __all__ = [
     "fold_consistency",
     "fold_slices",
     "fragility_report",
+    "ic_decay",
     "ledger_path",
     "max_drawdown",
     "max_loss_streak",
@@ -107,6 +110,7 @@ __all__ = [
     "regime_buckets",
     "resolve_exit_dates",
     "rolling_folds",
+    "rolling_ic",
     "slice_by_entry",
     "spearman",
     "summarize_periods",
