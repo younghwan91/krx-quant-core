@@ -21,6 +21,8 @@ from krx_quant_core.risk import (
     factor_returns,
     industry_dummies,
     specific_var,
+    specific_var_history,
+    specific_vra,
     standardize,
 )
 
@@ -365,6 +367,71 @@ def test_specific_var_shrink_and_short_history():
     np.testing.assert_allclose(sh[1 : N // 2], 0.7 * raw[1 : N // 2] + 0.3 * prior_lo,
                                rtol=1e-12)
     assert lo.sum() == N // 2
+
+
+def test_specific_var_history_columns_match_specific_var():
+    rng = np.random.default_rng(31)
+    N, T, hl = 60, 160, 30
+    U = rng.normal(size=(N, T)) * rng.uniform(0.01, 0.03, N)[:, None]
+    U[rng.random((N, T)) < 0.1] = np.nan
+    U[:5, :120] = np.nan  # 늦게 상장 — 앞쪽은 사전값만
+    size = rng.normal(size=(N, T)).cumsum(axis=1)
+    size[7, 50:] = np.nan
+    H = specific_var_history(U, half_life=hl, shrink=0.3, size=size, n_groups=4)
+    for t in (0, 10, 29, 30, 31, 90, 121, T - 1):
+        want = specific_var(U[:, : t + 1], half_life=hl, shrink=0.3, size=size[:, t], n_groups=4)
+        np.testing.assert_array_equal(np.isnan(H[:, t]), np.isnan(want))
+        np.testing.assert_allclose(H[:, t], want, rtol=1e-12, equal_nan=True)
+    one = specific_var_history(U, half_life=hl, shrink=0.5)
+    np.testing.assert_allclose(one[:, -1], specific_var(U, half_life=hl, shrink=0.5), rtol=1e-12)
+
+
+def test_specific_vra_near_one_when_stationary_and_tracks_regime():
+    rng = np.random.default_rng(32)
+    N, T, hl = 400, 700, 90
+    sd = rng.uniform(0.01, 0.03, N)
+    cap = np.repeat(rng.lognormal(0, 1, N)[:, None], T, axis=1)
+    U = rng.normal(size=(N, T)) * sd[:, None]
+    H = specific_var_history(U, half_life=hl, shrink=0.0)
+    lam2 = specific_vra(U, H, cap, half_life=42)
+    assert abs(lam2 - 1.0) < 0.08, lam2
+
+    U2 = U.copy()
+    U2[:, -40:] *= 2.0  # 최근 40일 특이변동성 2배(분산 4배)
+    H2 = specific_var_history(U2, half_life=hl, shrink=0.0)
+    lam2_hi = specific_vra(U2, H2, cap, half_life=21)
+    assert lam2_hi > 2.0, lam2_hi
+    # 가중 0·NaN 인 종목은 빠진다: 한 종목만 가중을 주면 그 종목의 B_t² 평균
+    c1 = np.zeros((N, T))
+    c1[3] = 1.0
+    z2 = U[3, 1:] ** 2 / H[3, :-1]
+    w = 0.5 ** (np.arange(T - 2, -1, -1) / 42.0)
+    ok = np.isfinite(z2)
+    want = (w[ok] @ z2[ok]) / w[ok].sum()
+    assert specific_vra(U, H, c1, half_life=42) == pytest.approx(want, rel=1e-12)
+    assert np.isnan(specific_vra(U, H, np.zeros((N, T)), half_life=42))
+
+
+def test_build_risk_model_vra_scales_only_D_and_default_is_v3():
+    R, styles, lab, cap, mask = _small_inputs()
+    asof = 300
+    kw = dict(cov_half_life=60, spec_half_life=60, nw_lags=2)
+    base = build_risk_model(R, styles, lab, cap, mask, asof, **kw)
+    off = build_risk_model(R, styles, lab, cap, mask, asof, spec_vra_half_life=None, **kw)
+    assert _same(base, off)
+    v = build_risk_model(R, styles, lab, cap, mask, asof, spec_vra_half_life=21, **kw)
+    assert v.names == base.names and np.array_equal(v.codes, base.codes)
+    assert np.array_equal(v.X, base.X) and np.array_equal(v.F, base.F)
+    ratio = v.D / base.D
+    np.testing.assert_allclose(ratio, ratio[0], rtol=1e-12)
+    assert ratio[0] != 1.0 and np.isfinite(ratio[0])
+
+    # VRA 경로도 asof 뒤를 보지 않는다
+    R2, st2, lab2, cap2, m2 = _copy(R, styles, lab, cap, mask)
+    after = slice(asof + 1, None)
+    R2[:, after] = np.random.default_rng(7).normal(0, 5, R2[:, after].shape)
+    cap2[:, after] *= 100.0
+    assert _same(v, build_risk_model(R2, st2, lab2, cap2, m2, asof, spec_vra_half_life=21, **kw))
 
 
 # ── 바이어스 통계 ────────────────────────────────────────────────────────────

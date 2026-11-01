@@ -35,6 +35,8 @@ __all__ = [
     "factor_returns",
     "industry_dummies",
     "specific_var",
+    "specific_var_history",
+    "specific_vra",
     "standardize",
 ]
 
@@ -427,6 +429,123 @@ def specific_var(
     return out
 
 
+def _shrink_to_size_groups(raw: np.ndarray, qual: np.ndarray, size: np.ndarray, shrink: float,
+                           n_groups: int) -> np.ndarray:
+    """:func:`specific_var` 의 사전값·수축 단계만(한 날짜). ``qual`` 이 비면 전부 NaN."""
+    N = raw.shape[0]
+    out = np.full(N, np.nan)
+    if not qual.any():
+        return out
+    prior = np.full(N, raw[qual].mean())
+    has = np.flatnonzero(np.isfinite(size))
+    if has.size:
+        order = has[np.argsort(size[has], kind="stable")]
+        k = max(1, int(n_groups))
+        grp = np.full(N, -1)
+        grp[order] = (np.arange(order.size) * k) // order.size
+        for g in range(k):
+            members = grp == g
+            q = members & qual
+            if q.any():
+                prior[members] = raw[q].mean()
+    out[:] = prior
+    out[qual] = (1.0 - shrink) * raw[qual] + shrink * prior[qual]
+    return out
+
+
+def specific_var_history(
+    U: np.ndarray,
+    *,
+    half_life: float,
+    shrink: float = 0.3,
+    size: np.ndarray | None = None,
+    n_groups: int = 10,
+) -> np.ndarray:
+    """날짜마다의 :func:`specific_var` 예측 ``(N, T)`` — 열 ``t`` 는 ``U[:, : t+1]`` 만 쓴 값.
+
+    EWMA 는 점화식(``num_t = λ num_{t-1} + u²_t``)으로 굴리므로 열 ``t`` 는
+    ``specific_var(U[:, :t+1], size=size[:, t])`` 와 부동소수 반올림 안에서 같다
+    (테스트가 1e-12 로 대조).
+    ``size`` 는 ``(N, T)`` 패널(``None`` = 한 그룹). :func:`specific_vra` 의 하루 앞 예측에 쓴다.
+    """
+    U = np.asarray(U, dtype=np.float64)
+    if U.ndim != 2:
+        raise ValueError("U 는 (N, T) 이어야 한다")
+    if not 0.0 <= shrink <= 1.0:
+        raise ValueError("shrink 는 [0, 1] 이어야 한다")
+    N, T = U.shape
+    if size is not None:
+        size = np.asarray(size, dtype=np.float64)
+        if size.shape != (N, T):
+            raise ValueError("size 는 U 와 같은 (N, T) 패널이어야 한다")
+    if not half_life > 0:
+        raise ValueError("half_life 는 양수여야 한다")
+    lam = 0.5 ** (1.0 / half_life)
+    num = np.zeros(N)
+    den = np.zeros(N)
+    nobs = np.zeros(N, dtype=np.int64)
+    out = np.full((N, T), np.nan)
+    nan_size = np.full(N, np.nan)
+    for t in range(T):
+        f = np.isfinite(U[:, t])
+        num = lam * num + np.where(f, U[:, t] * U[:, t], 0.0)
+        den = lam * den + f
+        nobs += f
+        with np.errstate(invalid="ignore", divide="ignore"):
+            raw = num / den
+        qual = (nobs >= half_life) & np.isfinite(raw)
+        out[:, t] = _shrink_to_size_groups(raw, qual, nan_size if size is None else size[:, t],
+                                           shrink, n_groups)
+    return out
+
+
+def specific_vra(
+    U: np.ndarray,
+    D_hist: np.ndarray,
+    weight: np.ndarray,
+    *,
+    half_life: float,
+) -> float:
+    """특이위험 변동성 국면 보정 승수 ``λ_S²`` (Barra USE4 specific VRA, Menchero·Orr·Wang 2011).
+
+    하루 앞 표준화 특이수익 ``z_it = u_it / √D̂_{i,t-1}`` 로 날짜별 횡단면 바이어스
+    ``B_t² = Σ_i c_{i,t-1} z_it² / Σ_i c_{i,t-1}`` 를 내고(``c`` = ``weight``, 보통 시총),
+    그 지수가중 평균 ``λ_S² = Σ_t w_t B_t² / Σ_t w_t`` 를 돌려준다
+    (``w_t = 0.5^((T-1-t)/half_life)``, ``B_t`` 가 있는 날만).
+    ``D̂ × λ_S²`` 가 보정된 특이분산이다. 예측이 맞으면 ``λ_S² ≈ 1``,
+    최근 특이위험이 예측보다 크면 > 1.
+    ``B_t`` 를 낼 종목이 하루도 없으면 NaN.
+
+    Args:
+        U: ``(N, T)`` 특이수익(:func:`factor_returns` 의 ``u``).
+        D_hist: ``(N, T)`` 날짜별 특이분산 예측(:func:`specific_var_history`).
+            열 ``t-1`` 로 ``t`` 를 표준화한다.
+        weight: ``(N, T)`` 횡단면 가중(음수·NaN 은 뺀다). 열 ``t-1`` 을 쓴다.
+        half_life: ``B_t²`` 지수가중 반감기(일).
+    """
+    U = np.asarray(U, dtype=np.float64)
+    Dh = np.asarray(D_hist, dtype=np.float64)
+    c = np.asarray(weight, dtype=np.float64)
+    if U.ndim != 2 or Dh.shape != U.shape or c.shape != U.shape:
+        raise ValueError("U·D_hist·weight 는 같은 (N, T) 패널이어야 한다")
+    T = U.shape[1]
+    if T < 2:
+        return float("nan")
+    with np.errstate(invalid="ignore", divide="ignore"):
+        z2 = U[:, 1:] ** 2 / Dh[:, :-1]
+    cp = c[:, :-1]
+    ok = np.isfinite(z2) & np.isfinite(Dh[:, :-1]) & (Dh[:, :-1] > 0) & np.isfinite(cp) & (cp > 0)
+    wz = np.where(ok, cp, 0.0)
+    den = wz.sum(axis=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        b2 = np.where(den > 0, (wz * np.where(ok, z2, 0.0)).sum(axis=0) / den, np.nan)
+    have = np.isfinite(b2)
+    if not have.any():
+        return float("nan")
+    wt = _ewma_weights(T - 1, half_life)
+    return float((wt[have] @ b2[have]) / wt[have].sum())
+
+
 # ── 위험모델 ────────────────────────────────────────────────────────────────────
 
 
@@ -500,6 +619,7 @@ def build_risk_model(
     nw_lags: int = 2,
     spec_shrink: float = 0.3,
     n_groups: int = 10,
+    spec_vra_half_life: float | None = None,
 ) -> RiskModel:
     """``asof_index`` 열까지만 써서 다음 날 수익의 위험모델을 만든다.
 
@@ -513,6 +633,13 @@ def build_risk_model(
     이력이 전혀 없는 팩터(예: asof 에 처음 생긴 업종)는 ``F`` 의 행·열을 0 으로 두고 그 팩터에
     노출된 종목을 뺀다(위험을 모르는 종목을 0 위험으로 넣지 않는다). 함께 관측된 적 없는
     팩터 쌍의 공분산도 0 으로 둔다.
+
+    ``spec_vra_half_life`` (기본 ``None`` = 끔 — 그때 결과는 이 인자가 없던 v3 와 비트 단위로
+    같다)를 주면 특이분산에 변동성 국면 승수를 곱한다: ``D ← D · λ_S²``. ``λ_S²`` 는
+    :func:`specific_var_history` (같은 ``spec_half_life``·``spec_shrink``·``n_groups``,
+    규모 = 날짜별 log 시총)의 하루 앞 예측으로 표준화한 특이수익의 시총가중 횡단면 바이어스를
+    반감기 ``spec_vra_half_life`` 로 평균한 값이다(:func:`specific_vra`).
+    ``X``·``F`` 는 바뀌지 않는다.
     """
     R = np.asarray(R, dtype=np.float64)
     N, T = R.shape
@@ -533,6 +660,12 @@ def build_risk_model(
         size = np.where(caps[:, a] > 0, np.log(caps[:, a]), np.nan)
     D = specific_var(fr.u, half_life=spec_half_life, shrink=spec_shrink, size=size,
                      n_groups=n_groups)
+    if spec_vra_half_life is not None:
+        with np.errstate(invalid="ignore", divide="ignore"):
+            size_hist = np.where(caps > 0, np.log(caps), np.nan)
+        Dh = specific_var_history(fr.u, half_life=spec_half_life, shrink=spec_shrink,
+                                  size=size_hist, n_groups=n_groups)
+        D = D * specific_vra(fr.u, Dh, caps, half_life=spec_vra_half_life)
 
     names = fr.names
     G = 0 if labs is None else len(names) - 1 - (0 if Xs is None else len(Xs))

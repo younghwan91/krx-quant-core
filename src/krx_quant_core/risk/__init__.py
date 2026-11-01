@@ -25,6 +25,8 @@ from .factor_model import (
     factor_returns,
     industry_dummies,
     specific_var,
+    specific_var_history,
+    specific_vra,
     standardize,
 )
 from .killswitch import (
@@ -63,5 +65,7 @@ __all__ = [
     "factor_returns",
     "industry_dummies",
     "specific_var",
+    "specific_var_history",
+    "specific_vra",
     "standardize",
 ]

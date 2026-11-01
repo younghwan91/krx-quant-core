@@ -178,3 +178,15 @@ as-of — max(avail_date, periodic rcept_dt) 다음 거래일, swing-it `eps_aso
 2. 사후 진단 4종(무작위 5종목·고변동/소형 십분위·업종 포트)을 다음 버전의 **사전등록 바에 넣는다**.
 3. quant-airflow: DART 주식수 백필분의 `knowledge_date` 가 수집일(예 035720 2020·2021 행 → 2024-03-20)이라
    보수적이지만 과도하게 낡는다 — 원 공시 접수일로 채울 수 있는지 확인.
+
+## 7. v4 선택지 — 특이위험 변동성 국면 보정 (2026-11-02, 구창 결과를 본 뒤 · 선택 전)
+
+swing-it PEAD 최적화 연구(PO-2)에서 v3 는 표본 안 최적화 포트(구창 OB, 사전 능동분산의 약 94% 가 특이위험)의 주간 위험을
+약 10% 과소예측했다(OB5 1.100, OB21 1.059). 그래서 **켜야만 동작하는** 인자를 더한다. 기본값은 v3 와 비트 단위로 같다.
+
+- `build_risk_model(..., spec_vra_half_life=None)`: 값을 주면 `D ← D·λ_S²` 다(Barra USE4 specific VRA, Menchero·Orr·Wang 2011).
+  - λ_S² 는 하루 앞 특이분산 예측(`specific_var_history`, 같은 반감기·수축·규모 그룹)으로 표준화한 특이수익에서 낸다.
+    날짜별 시총가중 횡단면 z² 평균을 반감기 `spec_vra_half_life` 로 지수가중 평균한 값이다(`specific_vra`). `X`·`F` 는 그대로다.
+- `spec_shrink` 는 이미 있던 인자다.
+- 초매개변수는 swing-it `research/logs/pead_optimizer/PREREG.md` 정정 PO-3 의 격자와 선택 규칙으로 고른다.
+  구창 표본 안 튜닝이고, 신창 판정은 그 문서가 정한다. 이 레포는 기본값을 바꾸지 않는다.
