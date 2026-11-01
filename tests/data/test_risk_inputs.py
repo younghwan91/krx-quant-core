@@ -23,7 +23,8 @@ def test_shares_usable_from_next_trading_day():
             "knowledge_date": pd.to_datetime(["2021-01-06"]),  # 3번째 거래일에 알게 됨
         }
     )
-    out = ri._asof_shares(sh, CODES, DATES)
+    out, ref = ri._asof_shares(sh, CODES, DATES)
+    assert (ref[0, 3:] == ri._days(np.datetime64("2020-12-31"))).all()  # 그 값의 기준일
     assert np.isnan(out[0, :3]).all()  # 그날까지는 모른다
     assert (out[0, 3:] == 100.0).all()  # 다음 거래일부터
     assert np.isnan(out[1]).all()
@@ -38,9 +39,25 @@ def test_shares_late_correction_of_old_date_does_not_override_newer():
             "knowledge_date": pd.to_datetime(["2021-01-04", "2021-01-05", "2021-01-07"]),
         }
     )
-    out = ri._asof_shares(sh, CODES, DATES)
+    out, _ = ri._asof_shares(sh, CODES, DATES)
     assert out[0, 1] == 100.0
     assert (out[0, 2:] == 200.0).all()  # 01-07 의 옛 기준일 정정(150)은 무시
+
+
+def test_roll_events_applies_only_events_after_reference_day():
+    # 5:1 분할(upd_rt −80%)이 5번째 거래일에. 기준일이 그 전이면 ×5, 뒤면 그대로.
+    ev = pd.DataFrame({"code": ["000001"], "date": [DATES[4]], "upd_rt": [-80.0]})
+    shares = np.full((2, 10), 1_000.0)
+    before = np.full((2, 10), ri._days(DATES[1]), dtype=np.int64)
+    out = ri._roll_events(shares, before, ev, CODES, DATES)
+    assert (out[0, :4] == 1_000.0).all()
+    assert np.allclose(out[0, 4:], 5_000.0)
+    assert (out[1] == 1_000.0).all()  # 사건 없는 종목
+    after = np.full((2, 10), ri._days(DATES[6]), dtype=np.int64)
+    assert np.allclose(ri._roll_events(shares, after, ev, CODES, DATES)[0, 6:], 1_000.0)
+    # 기준일이 패널보다 앞이어도 그 사이 사건을 센다(사건 날짜로 고른다).
+    old = np.full((2, 10), ri._days(np.datetime64("2020-12-31")), dtype=np.int64)
+    assert np.allclose(ri._roll_events(shares, old, ev, CODES, DATES)[0, 4:], 5_000.0)
 
 
 def test_ttm_rules():

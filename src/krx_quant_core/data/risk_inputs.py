@@ -36,12 +36,23 @@ from numpy.typing import NDArray
 from .daily import AFTERMARKET_START, TRADE_VALUE_UNIT, daily_panel, load_daily_bars
 from .db import connect, fetch_frame, sql_literal
 
-__all__ = ["CAP_SOURCES", "STYLE_NAMES", "RiskInputs", "load_risk_inputs", "style_panels"]
+__all__ = [
+    "CAP_SOURCES",
+    "SHARE_EVENT_KINDS",
+    "STYLE_NAMES",
+    "RiskInputs",
+    "load_risk_inputs",
+    "style_panels",
+]
 
 #: 스타일 원천 이름(:func:`style_panels` 의 키, 위험모델 노출 순서).
 STYLE_NAMES: tuple[str, ...] = ("size", "beta", "momentum", "resid_vol", "liquidity", "value")
 #: 시총 원 종가의 출처 코드(:attr:`RiskInputs.cap_src`). -1 = 시총 없음.
 CAP_SOURCES: tuple[str, ...] = ("daily_bars_raw", "supply_demand", "daily_bars_adjusted")
+#: 주식수를 굴리는 ``corporate_actions.kind`` — 분할·병합·권리락(무상·유상)·감자.
+#: 합병·인적분할은 제외(:func:`_roll_events`).
+SHARE_EVENT_KINDS: tuple[str, ...] = ("split", "reverse_split", "rights_ex", "capital_reduction")
+_NO_DAY = np.iinfo(np.int64).min // 2
 #: 스타일 계산 창(거래일).
 BETA_WINDOW, BETA_HALF_LIFE, BETA_MIN_OBS = 252, 63, 126
 MOM_LONG, MOM_SKIP = 252, 21
@@ -116,11 +127,16 @@ def _avail_index(dates: pd.DatetimeIndex, known: pd.Series) -> NDArray[np.int64]
 
 def _asof_shares(
     sh: pd.DataFrame, codes: NDArray[np.str_], dates: pd.DatetimeIndex
-) -> NDArray[np.float64]:
-    """상장주식수 as-of 패널. 쓸 수 있게 된 판 중 기준일이 가장 늦은 것(같으면 늦게 안 판)."""
+) -> tuple[NDArray[np.float64], NDArray[np.int64]]:
+    """상장주식수 as-of 패널과 그 값의 기준일(``date``, 1970-01-01 부터의 일 수 — 없으면 최솟값).
+
+    쓸 수 있게 된 판 중 기준일이 가장 늦은 것(같으면 늦게 안 판). 기준일은 :func:`_roll_events` 가
+    "그 뒤 사건"을 고르는 데 쓴다.
+    """
     out = np.full((len(codes), len(dates)), np.nan)
+    ref = np.full((len(codes), len(dates)), _NO_DAY, dtype=np.int64)
     if sh.empty:
-        return out
+        return out, ref
     sh = sh.assign(a=_avail_index(dates, sh["knowledge_date"]), d=pd.to_datetime(sh["date"]))
     sh = sh[sh["a"] < len(dates)].sort_values(["code", "a", "d", "knowledge_date"], kind="stable")
     cidx = pd.Index(codes)
@@ -139,6 +155,46 @@ def _asof_shares(
             if best_d is None or d >= best_d:
                 best_d = d
                 out[i, a:] = v
+                ref[i, a:] = _days(d)
+    return out, ref
+
+
+def _days(d: Any) -> int:
+    return int(np.datetime64(d, "D").astype(np.int64))
+
+
+def _roll_events(
+    shares: NDArray[np.float64],
+    ref: NDArray[np.int64],
+    events: pd.DataFrame,
+    codes: NDArray[np.str_],
+    dates: pd.DatetimeIndex,
+) -> NDArray[np.float64]:
+    """주식수 기준일 뒤, t 까지 일어난 분할·병합·권리락·감자를 주식수에 반영한다.
+
+    DART 주식수는 연 1행(12-31 기준, 80~90일 뒤 공시)이라 그 사이 분할이 있으면 원 종가만 떨어지고
+    주식수는 그대로다(035720 2021-04 5:1 분할 뒤 시총이 실제의 0.19배 — 리뷰 M5). ``events`` 는
+    ``corporate_actions`` 의 (code, date, upd_rt): ``date`` 는 새 기준 첫 거래일이고 그 전 가격 ×
+    (1 + upd_rt/100) 이 조정 가격이므로 주식수 배수는 그 역수다. 합병·인적분할(kind=merger)은
+    가격 계수가 주식수 변화와 다르므로(017670 2021-11 −82.75%, 실제 주식수 ×3.04) 넣지 않는다 —
+    :data:`SHARE_EVENT_KINDS`. 유상 권리락은 이론가 기준이라 실제 신주보다 적게 잡힌다(근사).
+    상장 종목만 사건이 있어 폐지 종목은 굴리지 않는다.
+    """
+    out = shares.copy()
+    if events.empty:
+        return out
+    day = dates.to_numpy("datetime64[D]").astype(np.int64)
+    cidx = pd.Index(codes)
+    for code, g in events.groupby("code", sort=False):
+        i = cidx.get_indexer([code])[0]
+        if i < 0:
+            continue
+        g = g.sort_values("date")
+        de = g["date"].to_numpy("datetime64[D]").astype(np.int64)
+        cum = np.r_[0.0, np.cumsum(-np.log1p(g["upd_rt"].to_numpy(np.float64) / 100.0))]
+        k_t = np.searchsorted(de, day, side="right")
+        k_r = np.searchsorted(de, ref[i], side="right")
+        out[i] = shares[i] * np.exp(cum[k_t] - cum[k_r])
     return out
 
 
@@ -259,7 +315,17 @@ def _load(conn: Any, lo: date, a: date, b: date) -> RiskInputs:
         ["code", "date", "shares_outstanding", "knowledge_date"],
         dtypes={"code": str, "shares_outstanding": float}, timestamps=["date", "knowledge_date"],
     )  # fmt: skip
-    shares = _asof_shares(sh, codes, dates)
+    shares, ref = _asof_shares(sh, codes, dates)
+    kinds = ", ".join(f"'{k}'" for k in SHARE_EVENT_KINDS)
+    ev = fetch_frame(
+        conn,
+        f"SELECT code, date, upd_rt FROM corporate_actions WHERE kind IN ({kinds}) "
+        f"AND upd_rt <> 0 AND upd_rt > -100 AND date <= {sql_literal(b)}",
+        ["code", "date", "upd_rt"],
+        dtypes={"code": str, "upd_rt": float},
+        timestamps=["date"],
+    )
+    shares = _roll_events(shares, ref, ev, codes, dates)
     cap = px * shares
     cap_src[~np.isfinite(cap)] = -1
 
@@ -326,17 +392,21 @@ def _sector_panel(
 
 
 def _assert_delisted(conn: Any, codes: NDArray[np.str_], a: date, b: date) -> None:
+    """창 안에 폐지된 종목의 95% 이상이 패널에 있어야 한다(1개만 있어도 통과하던 v1)."""
     dl = fetch_frame(
         conn,
         "SELECT code FROM delisted_stocks WHERE last_trade_date ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' "
         f"AND last_trade_date::date BETWEEN {sql_literal(a)} AND {sql_literal(b)}",
-        ["code"], dtypes={"code": str},
-    )  # fmt: skip
-    if len(dl) and not np.isin(dl["code"].astype(str).to_numpy(), codes).any():
-        raise AssertionError(
-            f"상장폐지 {len(dl)}종목이 DB 에 있는데 패널에 하나도 없다 — "
-            "생존편향(데이터 경로를 확인)"
-        )
+        ["code"],
+        dtypes={"code": str},
+    )
+    if len(dl):
+        have = np.isin(dl["code"].astype(str).to_numpy(), codes).mean()
+        if have < 0.95:
+            raise AssertionError(
+                f"창 안 상장폐지 {len(dl)}종목 중 {have:.0%} 만 패널에 있다 — "
+                "생존편향(데이터 경로를 확인)"
+            )
 
 
 def style_panels(x: RiskInputs) -> dict[str, NDArray[np.float64]]:

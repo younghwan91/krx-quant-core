@@ -75,13 +75,21 @@ def main() -> int:
     dates = x.dates[sl]
     asofs = month_ends(dates, START, R.shape[1] - 1)
     rng = np.random.default_rng(SEED)
+    rng_diag = np.random.default_rng(SEED + 1)  # 진단 추첨이 바 대상의 난수열을 바꾸지 않게
     rows = {"random": [], "capw": [], **{f"style:{k}": [] for k in STYLE_NAMES}}
+    # 사후 진단(리뷰 M1·M2 — 바가 못 보는 특이위험·업종·꼬리). 합격 바가 아니다.
+    diag = {"random5": [], "hivol_decile": [], "small_decile": []}
+    sectors = sorted({s for s in lab[:, -1] if s is not None})
+    diag.update({f"sector_ew:{g}": [] for g in sectors})
+    diag.update({f"sector_pure:{g}": [] for g in sectors})
     for n, a in enumerate(asofs):
         m = build_risk_model(R, Xs, lab, cap, msk, a, codes=np.arange(R.shape[0]))
         idx = m.codes.astype(int)
         fwd = np.nan_to_num(R[idx, a + 1 : a + 1 + HORIZON], nan=0.0).sum(axis=1)
+
         def z(w, fwd=fwd, m=m):
             return float(w @ fwd), float(np.sqrt(HORIZON * m.var(w)))
+
         rnd = []
         for _ in range(N_RANDOM):
             w = np.zeros(len(idx))
@@ -95,16 +103,48 @@ def main() -> int:
         P = np.linalg.pinv((m.X * W[:, None]).T @ m.X) @ (m.X * W[:, None]).T
         for k in STYLE_NAMES:
             rows[f"style:{k}"].append(z(P[m.names.index(k)]))
+        r5 = []
+        for _ in range(N_RANDOM):
+            w = np.zeros(len(idx))
+            w[rng_diag.choice(len(idx), 5, replace=False)] = 0.2
+            r5.append(z(w))
+        diag["random5"].append(r5)
+        for key, raw_k, top in (
+            ("hivol_decile", "resid_vol", True),
+            ("small_decile", "size", False),
+        ):
+            v = raw[raw_k][idx, a + first]
+            ok = np.isfinite(v)
+            cut = np.nanquantile(v, 0.9 if top else 0.1)
+            sel = ok & ((v >= cut) if top else (v <= cut))
+            diag[key].append(z(sel / sel.sum()))
+        labs_a = lab[idx, a]
+        for g in sectors:
+            sel = labs_a == g
+            diag[f"sector_ew:{g}"].append(z(sel / sel.sum()) if sel.any() else (np.nan, np.nan))
+            diag[f"sector_pure:{g}"].append(
+                z(P[m.names.index(g)]) if g in m.names else (np.nan, np.nan)
+            )
         if n % 6 == 0:
             print(f"  {dates[a].date()} 종목 {len(idx)} ({time.time() - t0:.0f}s)", flush=True)
 
-    result = {"window": [str(dates[asofs[0]].date()), str(dates[asofs[-1]].date())],
-              "n_asof": len(asofs), "horizon": HORIZON}
+    result = {
+        "window": [str(dates[asofs[0]].date()), str(dates[asofs[-1]].date())],
+        "n_asof": len(asofs),
+        "horizon": HORIZON,
+    }
     rr = np.array(rows["random"])  # (A, P, 2)
     result["random"] = bias_statistic((rr[:, :, 1]).T, (rr[:, :, 0]).T)
     for key in ["capw", *[f"style:{k}" for k in STYLE_NAMES]]:
         arr = np.array(rows[key])
         result[key] = bias_statistic(arr[:, 1], arr[:, 0])
+    r5 = np.array(diag.pop("random5"))
+    post = {"random5": bias_statistic(r5[:, :, 1].T, r5[:, :, 0].T)}
+    for key, vals in diag.items():
+        arr = np.array(vals, dtype=float)
+        arr = arr[np.isfinite(arr).all(axis=1)]
+        post[key] = bias_statistic(arr[:, 1], arr[:, 0])
+    result["post_hoc"] = post
     print(json.dumps(result, indent=1, ensure_ascii=False, default=float))
     if args.out:
         with open(args.out, "w") as fh:
