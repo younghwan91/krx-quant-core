@@ -11,7 +11,8 @@
   ``supply_demand.close`` → 수정 종가 순(:data:`CAP_SOURCES`, 실측 2021: 원주가에 없는
   248종목이 전부 폐지 종목, 그중 205가 수급표 종가를 가진다). 주식수는
   ``shares_outstanding_history`` 의 ``knowledge_date`` **다음 거래일**부터 — 같은 시점에 여러
-  판이면 기준일(``date``)이 가장 늦은 것.
+  판이면 기준일(``date``)이 가장 늦은 것. ``shares_basis="first_public"`` 이면 입력이 달라진다
+  (:func:`_shares_sql`).
 - 업종: ``wics_membership.sector_cd``(WICS 10 섹터 — 산업군 ``industry_cd`` 는 2019 미디어 등이 비어
   있다). 주간 스냅샷을 다음 스냅샷 전까지 앞으로 채운다. WICS 에 없는 종목(스팩·리츠·ETF)은 ``None``
   — 추정 유니버스에서 빠진다. 2019 이전은 전부 ``None``.
@@ -38,6 +39,8 @@ from .db import connect, fetch_frame, sql_literal
 
 __all__ = [
     "CAP_SOURCES",
+    "MERGER_GAP_MIN_RATIO",
+    "SHARES_BASES",
     "SHARE_EVENT_KINDS",
     "STYLE_NAMES",
     "RiskInputs",
@@ -52,6 +55,13 @@ CAP_SOURCES: tuple[str, ...] = ("daily_bars_raw", "supply_demand", "daily_bars_a
 #: 주식수를 굴리는 ``corporate_actions.kind`` — 분할·병합·권리락(무상·유상)·감자.
 #: 합병·인적분할은 제외(:func:`_roll_events`).
 SHARE_EVENT_KINDS: tuple[str, ...] = ("split", "reverse_split", "rights_ex", "capital_reduction")
+#: :func:`load_risk_inputs` 의 ``shares_basis``. ``"knowledge_date"`` = 기본(옛 입력),
+#: ``"first_public"`` = :func:`_shares_sql`.
+SHARES_BASES: tuple[str, ...] = ("knowledge_date", "first_public")
+#: 이 배수 이상 가격이 다시 매겨진 ``merger`` 만 큰 사건으로 본다(:func:`_merger_gap_mask`).
+#: 실측 merger 119건의 중앙값은 −0.67% — 작은 합병까지 지우면 시총이 괜히 빈다.
+#: ×1.2 면 2019~2026-09 에 36건 중 21건(017670 2021-11 −82.75% 포함).
+MERGER_GAP_MIN_RATIO = 1.2
 _NO_DAY = np.iinfo(np.int64).min // 2
 #: 스타일 계산 창(거래일).
 BETA_WINDOW, BETA_HALF_LIFE, BETA_MIN_OBS = 252, 63, 126
@@ -159,6 +169,71 @@ def _asof_shares(
     return out, ref
 
 
+def _shares_sql(b: date, basis: str) -> str:
+    """상장주식수 입력 SQL — 열은 (code, date, shares_outstanding, knowledge_date).
+
+    어느 쪽이든 :func:`_asof_shares` 는 같다.
+
+    ``"knowledge_date"``: 도장이 있는 행만. 키움 행(NULL)이 빠지고, dart 도장은 **마지막 정정본**
+    접수일이라 늦다(017670 2021-12-31: 원본 2022-03-16, 도장 08-12 — 그 사이 합병 전 주식수를 썼다).
+
+    ``"first_public"``: 본표 ``coalesce(knowledge_date, date)`` ∪ ``shares_original_filing``
+    (quant-airflow migration 039, 원본 공시의 접수일·그때 값). 같은 기준일은 :func:`_asof_shares`
+    규칙대로 늦게 안 판이 덮으므로 원본 값을 첫 공시일부터 쓰고 정정 값은 정정일부터 쓴다.
+    """
+    if basis == "knowledge_date":
+        return (
+            "SELECT code, date, shares_outstanding, knowledge_date "
+            "FROM shares_outstanding_history "
+            f"WHERE knowledge_date <= {sql_literal(b)}"
+        )
+    if basis == "first_public":
+        return (
+            "SELECT code, date, shares_outstanding, coalesce(knowledge_date, date) "
+            "FROM shares_outstanding_history "
+            f"WHERE coalesce(knowledge_date, date) <= {sql_literal(b)} "
+            "UNION ALL "
+            "SELECT code, date, shares_original, first_public_date FROM shares_original_filing "
+            f"WHERE first_public_date <= {sql_literal(b)}"
+        )
+    raise ValueError(f"shares_basis 는 {SHARES_BASES} 중 하나다: {basis!r}")
+
+
+def _merger_gap_mask(
+    ref: NDArray[np.int64],
+    events: pd.DataFrame,
+    codes: NDArray[np.str_],
+    dates: pd.DatetimeIndex,
+    min_ratio: float = MERGER_GAP_MIN_RATIO,
+) -> NDArray[np.bool_]:
+    """큰 합병·인적분할 뒤, 그 뒤 기준일의 주식수를 아직 모르는 칸(True = 시총을 비울 칸).
+
+    :func:`_roll_events` 는 ``merger`` 를 굴리지 않는다 — 가격 계수가 주식수 변화와 달라서다(017670
+    2021-11 가격 −82.75%, 실제 주식수 ×3.04). 그래서 사건 날부터 다음 공시까지는 사건 뒤 가격 ×
+    사건 전 주식수 = 틀린 시총이다(017670 은 실제의 약 1/3). 근사로 메우지 않고 비운다 — 틀린 값보다
+    없는 값(quant-airflow CLAUDE.md §3).
+
+    ``events`` 는 (code, date, upd_rt), |log(1 + upd_rt/100)| ≥ log(``min_ratio``) 만 본다.
+    칸 (i, t) 는 t ≥ 사건 날이고 그 칸이 쓰는 주식수의 기준일 ``ref[i, t]`` 가 사건 날보다 앞이면
+    True.
+    사건 날 이후 기준일 행이 공개되면 그날부터 값이 돌아온다.
+    """
+    out = np.zeros(ref.shape, dtype=bool)
+    if events.empty:
+        return out
+    size = np.abs(np.log1p(events["upd_rt"].to_numpy(np.float64) / 100.0))
+    big = events[size >= np.log(min_ratio)]
+    day = dates.to_numpy("datetime64[D]").astype(np.int64)
+    cidx = pd.Index(codes)
+    for code, event_day in zip(big["code"], big["date"], strict=True):
+        i = cidx.get_indexer([code])[0]
+        if i < 0:
+            continue
+        e = _days(event_day)
+        out[i] |= (day >= e) & (ref[i] < e)
+    return out
+
+
 def _days(d: Any) -> int:
     return int(np.datetime64(d, "D").astype(np.int64))
 
@@ -248,12 +323,19 @@ def load_risk_inputs(
     *,
     conn: Any = None,
     warmup_days: int = WARMUP_DAYS,
+    shares_basis: str = "knowledge_date",
 ) -> RiskInputs:
     """[start − warmup, end] 를 읽어 패널로. ``dates`` 는 그 전체(스타일 창 계산용 앞부분 포함).
 
     호출부는 ``dates`` 에서 start 이후 열만 asof 로 쓴다. 상장폐지 종목이 DB 에는 있는데
     결과에 없으면 ``AssertionError``(생존편향 가드 — swing-it ``read_prices`` 와 같은 원칙).
+
+    ``shares_basis="first_public"`` 은 시총의 주식수를 첫 공시 도장으로 읽고(:func:`_shares_sql`)
+    큰 합병 뒤 공백을 비운다(:func:`_merger_gap_mask`). 시총·``cap_src`` 가 바뀌므로 새 옵션이다 —
+    기본값은 옛 입력 그대로(수치 동일성 계약). 표 ``shares_original_filing`` 이 있는 DB 에서만 쓴다.
     """
+    if shares_basis not in SHARES_BASES:
+        raise ValueError(f"shares_basis 는 {SHARES_BASES} 중 하나다: {shares_basis!r}")
     a, b = _day(start), _day(end)
     if b >= AFTERMARKET_START:
         raise ValueError(
@@ -264,13 +346,15 @@ def load_risk_inputs(
     own = conn is None
     c = connect() if own else conn
     try:
-        return _load(c, lo, a, b)
+        return _load(c, lo, a, b, shares_basis)
     finally:
         if own:
             c.close()
 
 
-def _load(conn: Any, lo: date, a: date, b: date) -> RiskInputs:
+def _load(
+    conn: Any, lo: date, a: date, b: date, shares_basis: str = "knowledge_date"
+) -> RiskInputs:
     equities = _equity_codes(conn)
     bars = load_daily_bars(lo, b, adjusted=True, conn=conn)
     bars = bars[bars["code"].astype(str).isin(equities)]
@@ -310,8 +394,7 @@ def _load(conn: Any, lo: date, a: date, b: date) -> RiskInputs:
 
     sh = fetch_frame(
         conn,
-        f"SELECT code, date, shares_outstanding, knowledge_date FROM shares_outstanding_history "
-        f"WHERE knowledge_date <= {sql_literal(b)}",
+        _shares_sql(b, shares_basis),
         ["code", "date", "shares_outstanding", "knowledge_date"],
         dtypes={"code": str, "shares_outstanding": float}, timestamps=["date", "knowledge_date"],
     )  # fmt: skip
@@ -327,6 +410,16 @@ def _load(conn: Any, lo: date, a: date, b: date) -> RiskInputs:
     )
     shares = _roll_events(shares, ref, ev, codes, dates)
     cap = px * shares
+    if shares_basis == "first_public":
+        mergers = fetch_frame(
+            conn,
+            "SELECT code, date, upd_rt FROM corporate_actions WHERE kind = 'merger' "
+            f"AND upd_rt <> 0 AND upd_rt > -100 AND date <= {sql_literal(b)}",
+            ["code", "date", "upd_rt"],
+            dtypes={"code": str, "upd_rt": float},
+            timestamps=["date"],
+        )
+        cap[_merger_gap_mask(ref, mergers, codes, dates)] = np.nan
     cap_src[~np.isfinite(cap)] = -1
 
     wics = fetch_frame(
