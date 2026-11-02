@@ -49,15 +49,18 @@ pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@
 | 모듈 | 하는 일 |
 |---|---|
 | `market/` | 종목코드 정규화·Market, 호가단위(스칼라·벡터·ETF), 상·하한가, KST 세션, 거래일 달력 |
-| `costs/` | 시행일별 거래세 스케줄, `KoreanCostModel`(Decimal), `round_trip_cost`(float) |
+| `costs/` | 시행일별 거래세 스케줄, `KoreanCostModel`(Decimal), `round_trip_cost`(float), `impact`(제곱근 충격 비용, `trade_cost_bp`) |
 | `execution/` | 주문 관리 계층 — `OrderManager`·`InstanceLock`, `PositionBook`, `Broker` 프로토콜(`PaperBroker`·`KiwoomBroker`), `EngineCore`(같은 전략을 실매매와 리플레이에서), `OrderGuard`, 키움 REST 주문 스펙 |
-| `risk/` | DART 중대공시 분류·`RiskGate`, `DartDisclosureDB`, `KillSwitch` |
+| `risk/` | DART 중대공시 분류·`RiskGate`, `DartDisclosureDB`, `KillSwitch`, `factor_model`(팩터 위험모델 `RiskModel`), `attribution`(성과 귀속) |
 | `backtest/` | 호가 스윕 VWAP·왕복비용, 지정가 체결 규칙, 트레이드 원장 지표, 횡단면 시뮬, `replay`(과거 이벤트 리플레이), `drift`(일중·야간 수익 분해), `ticktime`(불규칙 틱시각 창) |
 | `backtest/lob/` | 틱·호가 → 초 격자 특징·경로(배치=실시간 공용 커널), 에피소드 시뮬, 무작위 대조군, 지정가 대기열 모델, `ceiling`(오라클 천장) |
-| `data/` | 공용 DB 를 `COPY` 로 한 번 읽어 열 단위 `.npy` + mmap — 하루치 틱·호가·분봉 CSR, 연도별 일봉·패널, 거래일 달력, 정규장 기준가 복원 |
-| `stats/` | Deflated/Probabilistic Sharpe, t-haircut, purged walk-forward, 부트스트랩, 취약성, 후보 선택편향, 층 매칭 대조군 |
+| `data/` | 공용 DB 를 `COPY` 로 한 번 읽어 열 단위 `.npy` + mmap — 하루치 틱·호가·분봉 CSR, 연도별 일봉·패널, 거래일 달력, 정규장 기준가 복원, `risk_inputs.load_risk_inputs`(위험모델 입력을 그 시점에 알던 값으로, `shares_basis="first_public"` 면 주식수를 처음 공개된 날 기준으로) |
+| `stats/` | Deflated/Probabilistic Sharpe, t-haircut, purged walk-forward, 부트스트랩, 취약성, 후보 선택편향, 층 매칭 대조군, `ic`(`rolling_ic`·`ic_decay`·`signal_turnover`) |
+| `portfolio/` | `optimize` — 팩터 위험모델 위의 제약 평균-분산 최적화(선형·3/2 제곱 거래비용). `[portfolio]` extra(cvxpy) 필요 |
 | `research/` | `run_sweep`(격자·병렬·캐시), `optuna_search`, `evolve`(탐색 공간·BIPOP CMAwM·세대 프로토콜·짝 레이싱·봉인) |
 | `runtime/` | 호스트 가드, 실행 기록 `start_run`, OOS 하드 잠금, `kqc` CLI(원격 실행·`nightly`·`pins`) |
+
+`portfolio/`·`factor_model`·`attribution`·`impact`·`risk_inputs`·`stats.ic` 는 v0.8.0 태그 뒤에 들어와 아직 main 에만 있다 — 쓰려면 main 의 커밋에 고정해 설치한다.
 
 쓰는 쪽은 전략 레포들이다. 각자 `krx-quant-core==X.Y.Z` 로 정확히 핀해 받는다.
 
@@ -65,7 +68,7 @@ pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@
 |---|---|---|---|
 | [scalp-it](https://github.com/younghwan91) (비공개) | 스캘핑 | 자동 실주문 | 호가·상한가·주문 가드·호가 스윕·체결 규칙·호스트 가드 |
 | [daytrade-it](https://github.com/younghwan91) (비공개) | 데이트레이딩 | 자동 실주문 | 비용모델·공시 리스크 게이트·DART DB·코드 정규화·호스트 가드 |
-| [swing-it](https://github.com/younghwan91/swing-it) | 스윙 | 리서치 + 수동 체결 | DSR·purged CV·부트스트랩·취약성 진단·횡단면 시뮬·진화 엔진 |
+| [swing-it](https://github.com/younghwan91/swing-it) | 스윙 | 리서치 + 수동 체결 | DSR·purged CV·부트스트랩·취약성 진단·횡단면 시뮬·진화 엔진, 연구 경로에서 위험모델·최적화 층 |
 
 ## 왜 따로 뺐나
 
