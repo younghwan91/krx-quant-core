@@ -44,6 +44,83 @@ def test_shares_late_correction_of_old_date_does_not_override_newer():
     assert (out[0, 2:] == 200.0).all()  # 01-07 의 옛 기준일 정정(150)은 무시
 
 
+def test_original_filing_row_counts_from_first_public_then_correction_overrides():
+    # first_public 입력(원본 + 본표)을 _asof_shares 가 그대로 받는다 — 로직은 안 바뀐다
+    sh = pd.DataFrame(
+        {
+            "code": ["000001", "000001"],
+            "date": pd.to_datetime(["2020-12-31", "2020-12-31"]),
+            "shares_outstanding": [100.0, 110.0],
+            "knowledge_date": pd.to_datetime(["2021-01-05", "2021-01-08"]),  # 원본, 정정
+        }
+    )
+    out, ref = ri._asof_shares(sh, CODES, DATES)
+    assert np.isnan(out[0, 1])  # 01-05 까지는 모른다
+    assert (out[0, 2:5] == 100.0).all()  # 원본 값을 첫 공시 다음 거래일부터
+    assert (out[0, 5:] == 110.0).all()  # 정정 값은 정정일 다음 거래일부터
+    assert (ref[0, 2:] == ri._days(np.datetime64("2020-12-31"))).all()
+
+
+def test_shares_sql_default_is_the_old_query():
+    # 기본값은 옛 입력 그대로 — 수치 동일성 계약(CLAUDE.md). 옆 표 없는 DB 에서도 돈다.
+    sql = ri._shares_sql(date(2023, 12, 28), "knowledge_date")
+    assert sql == (
+        "SELECT code, date, shares_outstanding, knowledge_date "
+        "FROM shares_outstanding_history "
+        "WHERE knowledge_date <= '2023-12-28'"
+    )
+
+
+def test_shares_sql_first_public_reads_null_stamp_rows_and_side_table():
+    sql = ri._shares_sql(date(2023, 12, 28), "first_public")
+    assert "coalesce(knowledge_date, date) <= '2023-12-28'" in sql  # 키움 NULL 행도 그날 안 값으로
+    assert "UNION ALL" in sql and "shares_original_filing" in sql
+    assert "first_public_date <= '2023-12-28'" in sql
+
+
+def test_unknown_shares_basis_is_refused_before_touching_the_db():
+    with pytest.raises(ValueError, match="shares_basis"):
+        ri.load_risk_inputs("2021-01-04", "2021-02-01", shares_basis="latest", conn=object())
+    with pytest.raises(ValueError, match="shares_basis"):
+        ri._shares_sql(date(2023, 12, 28), "latest")
+
+
+def _merger(rt, day=4):
+    return pd.DataFrame({"code": ["000001"], "date": [DATES[day]], "upd_rt": [rt]})
+
+
+def test_big_merger_blanks_cap_until_a_row_dated_after_the_event_is_public():
+    # 017670 꼴: 사건 전 기준일 주식수를 쓰는 칸만 비운다.
+    # 사건 뒤 기준일 행(8번째 거래일 공개)부터 돌아온다.
+    ref = np.full((2, 10), ri._days(DATES[0]), dtype=np.int64)
+    ref[0, 7:] = ri._days(DATES[5])  # 기준일 > 사건 날
+    mask = ri._merger_gap_mask(ref, _merger(-82.75), CODES, DATES)
+    assert mask[0].tolist() == [False] * 4 + [True] * 3 + [False] * 3
+    assert not mask[1].any()  # 다른 종목은 그대로
+
+
+@pytest.mark.parametrize("rt", [-16.0, -0.67, 19.99])
+def test_small_merger_keeps_cap(rt):
+    # 실측 merger 중앙값 −0.67% — 이 크기까지 지우면 시총이 괜히 빈다
+    ref = np.full((2, 10), ri._days(DATES[0]), dtype=np.int64)
+    assert not ri._merger_gap_mask(ref, _merger(rt), CODES, DATES).any()
+
+
+@pytest.mark.parametrize("rt", [-82.75, -50.0, 47.17, 24.76])
+def test_big_merger_either_direction(rt):
+    # 인적분할 재상장은 위로 뛴다(207940 2025-11 +47.17%)
+    ref = np.full((2, 10), ri._days(DATES[0]), dtype=np.int64)
+    assert ri._merger_gap_mask(ref, _merger(rt), CODES, DATES)[0, 4:].all()
+
+
+def test_merger_gap_ignores_codes_outside_panel_and_rows_already_after_event():
+    ref = np.full((2, 10), ri._days(DATES[9]), dtype=np.int64)  # 기준일이 이미 사건 뒤
+    assert not ri._merger_gap_mask(ref, _merger(-82.75), CODES, DATES).any()
+    outside = pd.DataFrame({"code": ["999999"], "date": [DATES[4]], "upd_rt": [-82.75]})
+    assert not ri._merger_gap_mask(ref, outside, CODES, DATES).any()
+    assert not ri._merger_gap_mask(ref, outside.iloc[:0], CODES, DATES).any()
+
+
 def test_roll_events_applies_only_events_after_reference_day():
     # 5:1 분할(upd_rt −80%)이 5번째 거래일에. 기준일이 그 전이면 ×5, 뒤면 그대로.
     ev = pd.DataFrame({"code": ["000001"], "date": [DATES[4]], "upd_rt": [-80.0]})
