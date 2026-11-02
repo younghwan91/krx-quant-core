@@ -28,7 +28,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       # numba 가속 경로 + numba/폴백 동일성 테스트(서브프로세스)까지 돈다.
-      - run: pip install -e ".[dev,fast]"
+      # [portfolio](cvxpy)도 넣어 portfolio.optimize 테스트가 여기서 실제로 돈다(no-numba 잡에선 skip).
+      - run: pip install -e ".[dev,fast,portfolio]"
       - run: pytest -q
 
   test-no-numba:

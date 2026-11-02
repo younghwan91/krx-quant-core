@@ -32,6 +32,8 @@ db = ["psycopg[binary]>=3.1"]
 opt = ["optuna>=4.0"]
 # research.evolve 최적화기 백엔드(CMAwM·CatCMAwM). FastCMAwM 은 이 버전의 내부를 가정한다 — 다른 버전이면 라이브러리 ask/tell 로 폴백.
 evo = ["cmaes==0.13.1"]
+# portfolio.optimize — 제약 평균-분산(볼록 QP + 3/2 제곱 충격). 없으면 optimize() 호출 때 안내 예외.
+portfolio = ["cvxpy>=1.5"]
 
 [project.scripts]
 kqc = "krx_quant_core.runtime.cli:main"

@@ -262,14 +262,19 @@ def rank_ic(
     fresh_days: int = 0,
     n_regimes: int = 4,
     age: np.ndarray | None = None,
+    return_series: bool = False,
 ) -> dict:
     """신호 vs 선행수익의 일별 횡단면 순위 IC + Newey-West t + 국면별 분해.
 
     적격 종목이 20개 미만인 날은 건너뛴다. HAC lag = ``horizon`` (겹치는 선행수익 보정).
     ``dates`` 라벨의 앞 7자(``YYYY-MM``)가 국면 start/end 로 실린다.
 
+    ``return_series=True`` 면 일별 IC 열(``"ic"``, ndarray)과 그 날짜(``"ic_dates"``)를 덧붙인다
+    — :mod:`krx_quant_core.stats.ic` 가 쓰는 선택 키다. 기본(``False``)의 반환 키·값은 그대로다.
+
     Returns:
-        ``{"ic_mean", "ic_nw_t", "n_days", "frac_positive", "regimes"}``.
+        ``{"ic_mean", "ic_nw_t", "n_days", "frac_positive", "regimes"}``
+        (+ ``"ic"``, ``"ic_dates"`` when ``return_series``).
     """
     C = close
     V = trade_value
@@ -309,8 +314,12 @@ def rank_ic(
             m, tt = newey_west_t(ic[s0:s1], horizon)
             regimes.append({"start": ic_dates[s0][:7], "end": ic_dates[s1 - 1][:7],
                             "ic_mean": m, "nw_t": tt})
-    return {
+    out = {
         "ic_mean": mean_ic, "ic_nw_t": nw_t, "n_days": len(ic),
         "frac_positive": float((ic > 0).mean()) if len(ic) else float("nan"),
         "regimes": regimes,
     }
+    if return_series:
+        out["ic"] = ic
+        out["ic_dates"] = ic_dates
+    return out
