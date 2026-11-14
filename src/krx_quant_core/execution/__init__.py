@@ -18,9 +18,9 @@ from .guards import (
     holdings_block_reason,
 )
 from .kiwoom_broker import KiwoomBroker
-from .kiwoom_spec import strip_sign
+from .kiwoom_spec import InvalidOrderBody, strip_sign, validate_order_body
 from .oms import AlreadyRunning, InstanceLock, ManagedResult, OrderManager, ReconcileReport
-from .orders import OrderBlocked, OrderIntent, OrderResult, cancel_body
+from .orders import OrderBlocked, OrderIntent, OrderResult, cancel_body, modify_body
 from .paper import PaperBroker
 
 __all__ = [
@@ -32,6 +32,7 @@ __all__ = [
     "Fill",
     "Holding",
     "InstanceLock",
+    "InvalidOrderBody",
     "KiwoomBroker",
     "ManagedResult",
     "OpenOrder",
@@ -53,6 +54,8 @@ __all__ = [
     "count_limit_reason",
     "evaluate_order",
     "holdings_block_reason",
+    "modify_body",
     "normalize_ord_no",
     "strip_sign",
+    "validate_order_body",
 ]

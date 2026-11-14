@@ -24,6 +24,9 @@ scalp-it ``adapters/kiwoom_order.py`` 와 daytrade-it
   ``{dmst_stex_tp, orig_ord_no, stk_cd, cncl_qty}``(``cncl_qty="0"`` = 잔량 전부), 정정 kt10002 는
   ``{dmst_stex_tp, orig_ord_no, stk_cd, mdfy_qty, mdfy_uv[, mdfy_cond_uv]}`` 다.
   코어는 공식 필드명으로 바꿨지만 **실주문 취소 스모크로 확인되기 전까지 "미확인"** 이다.
+  같은 실수가 다시 나가지 않게 :data:`ORDER_BODY_FIELDS`(공식 스펙에서 옮긴 TR 별 필드 표)와
+  :func:`validate_order_body` 를 두고, 바디 빌더와 ``KiwoomBroker`` 가 POST 전에 부른다 —
+  스펙에 없는 필드나 빠진 필수 필드는 네트워크 전에 :class:`InvalidOrderBody` 로 막힌다.
 * 주문 바디에는 계좌번호가 **안 들어간다** — 토큰이 계좌에 묶여 있다.
 
 확인 안 된 것 — 시장가 매매구분
@@ -54,6 +57,8 @@ POST 는 재시도도 없다. 토큰은 스스로 만료되게 둔다.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any
 
 __all__ = [
@@ -64,8 +69,11 @@ __all__ = [
     "BUY_API_ID",
     "CANCEL_API_ID",
     "DEFAULT_EXCHANGE",
+    "InvalidOrderBody",
     "KIWOOM_BASE",
     "KIWOOM_MOCK_BASE",
+    "MODIFY_API_ID",
+    "ORDER_BODY_FIELDS",
     "ORDER_PATH",
     "PRICE_API_ID",
     "SELL_API_ID",
@@ -78,6 +86,7 @@ __all__ = [
     "UNFILLED_API_ID",
     "UNFILLED_ROWS_KEY",
     "strip_sign",
+    "validate_order_body",
 ]
 
 #: 실계좌 REST 베이스.
@@ -86,7 +95,7 @@ KIWOOM_BASE = "https://api.kiwoom.com"
 KIWOOM_MOCK_BASE = "https://mockapi.kiwoom.com"
 
 # ----- 경로 ------------------------------------------------------------------
-#: 주문 3종(매수·매도·취소) 공통 경로. api-id 헤더로 구분한다.
+#: 주문 4종(매수·매도·정정·취소) 공통 경로. api-id 헤더로 구분한다.
 ORDER_PATH = "/api/dostk/ordr"
 #: 계좌 조회(계좌번호·잔고·미체결) 경로.
 ACCOUNT_PATH = "/api/dostk/acnt"
@@ -98,6 +107,9 @@ STKINFO_PATH = "/api/dostk/stkinfo"
 BUY_API_ID = "kt10000"
 #: 현금 매도. 실주문 확인.
 SELL_API_ID = "kt10001"
+#: 정정. 바디 ``{dmst_stex_tp, orig_ord_no, stk_cd, mdfy_qty, mdfy_uv[, mdfy_cond_uv]}`` —
+#: 공식 스펙 기준, 실주문 미확인.
+MODIFY_API_ID = "kt10002"
 #: 취소. 바디 ``{dmst_stex_tp, orig_ord_no, stk_cd, cncl_qty}`` — 공식 스펙 기준, 실주문 미확인.
 CANCEL_API_ID = "kt10003"
 #: 계좌번호조회. 빈 바디, 응답 ``acctNo``(10자리).
@@ -126,6 +138,61 @@ TRDE_TP_MARKET_SCALP_DOC = "3"
 TRDE_TP_MARKET_VERIFIED = False
 #: 거래소구분 기본. 실주문 확인(``"01"`` 아님). ``"NXT"``/``"SOR"`` 도 문서상 가능.
 DEFAULT_EXCHANGE = "KRX"
+
+# ----- 주문 바디 필드 표 ----------------------------------------------------------
+#: TR 별 요청 바디 필드 ``(필드명, 필수 여부)`` — 공식 스펙 JSON 의 순서 그대로.
+#: 출처: ``Kiwoom-Securities/Kiwoom-REST-API`` ``kiwoom/_data/kiwoom_api_spec.json`` c7a3d25
+#: (sha256 ``42a7b391…cba79``) 의 ``apis[*].request.body``. 테스트
+#: ``tests/execution/data/kiwoom_order_spec_c7a3d25.json``(같은 스펙에서 네 TR 만 뽑은 사본)과
+#: 글자 하나까지 대조한다. 옛 취소 바디의 ``org_ord_no``·``ord_qty``(kt10003)는 여기 없어서
+#: :func:`validate_order_body` 가 거부한다.
+ORDER_BODY_FIELDS: Mapping[str, tuple[tuple[str, bool], ...]] = MappingProxyType({
+    BUY_API_ID: (
+        ("dmst_stex_tp", True), ("stk_cd", True), ("ord_qty", True),
+        ("ord_uv", False), ("trde_tp", True), ("cond_uv", False),
+    ),
+    SELL_API_ID: (
+        ("dmst_stex_tp", True), ("stk_cd", True), ("ord_qty", True),
+        ("ord_uv", False), ("trde_tp", True), ("cond_uv", False),
+    ),
+    MODIFY_API_ID: (
+        ("dmst_stex_tp", True), ("orig_ord_no", True), ("stk_cd", True),
+        ("mdfy_qty", True), ("mdfy_uv", True), ("mdfy_cond_uv", False),
+    ),
+    CANCEL_API_ID: (
+        ("dmst_stex_tp", True), ("orig_ord_no", True), ("stk_cd", True),
+        ("cncl_qty", True),
+    ),
+})
+
+
+class InvalidOrderBody(ValueError):
+    """주문·정정·취소 바디가 공식 스펙 필드와 안 맞는다 — 네트워크로 나가기 전에 막는다."""
+
+
+def validate_order_body(api_id: str, body: Mapping[str, Any]) -> None:
+    """``body`` 가 ``api_id`` 의 공식 요청 필드와 맞는지 본다. 안 맞으면 :class:`InvalidOrderBody`.
+
+    * 표에 없는 TR → 거부(검사 못 한 바디를 내보내지 않는다).
+    * 스펙에 없는 필드(예: 취소의 옛 ``org_ord_no``·``ord_qty``) → 거부.
+    * 필수 필드가 없거나 빈 문자열·``None`` → 거부. 값 ``"0"`` 은 유효하다
+      (``cncl_qty``·``mdfy_qty`` 의 ``"0"`` = 잔량 전부).
+
+    값의 의미(가격 범위·호가단위 등)는 보지 않는다 — 그건 가드 몫이다.
+    """
+    fields = ORDER_BODY_FIELDS.get(api_id)
+    if fields is None:
+        raise InvalidOrderBody(f"필드 표에 없는 주문 TR: {api_id!r}")
+    known = {name for name, _ in fields}
+    unknown = [k for k in body if k not in known]
+    if unknown:
+        raise InvalidOrderBody(
+            f"{api_id} 바디에 스펙에 없는 필드: {unknown} (허용: {[n for n, _ in fields]})"
+        )
+    missing = [name for name, req in fields if req and body.get(name) in (None, "")]
+    if missing:
+        raise InvalidOrderBody(f"{api_id} 바디에 필수 필드 누락·빈 값: {missing}")
+
 
 #: 로그·코드리뷰에서 인용하라고 둔 한 줄 경고.
 TOKEN_SHARING_WARNING = (

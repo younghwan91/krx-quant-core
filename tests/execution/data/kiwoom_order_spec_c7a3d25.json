@@ -1,0 +1,163 @@
+{
+  "source": "https://github.com/Kiwoom-Securities/Kiwoom-REST-API/blob/c7a3d25/kiwoom/_data/kiwoom_api_spec.json",
+  "sha256": "42a7b3912c9d9588c83bdc2db7779c8d2e038703a2b5562e54ef46ae905cba79",
+  "note": "apis[*].request.body 에서 kt10000~kt10003 만 뽑은 사본(element·required·한글명·description). 수정 금지 — 스펙이 바뀌면 다시 뽑는다.",
+  "trs": {
+    "kt10000": {
+      "name": "주식 매수주문(kt10000)",
+      "url": "/api/dostk/ordr",
+      "body": [
+        {
+          "element": "dmst_stex_tp",
+          "required": "Y",
+          "한글명": "국내거래소구분",
+          "description": "KRX,NXT,SOR"
+        },
+        {
+          "element": "stk_cd",
+          "required": "Y",
+          "한글명": "종목코드",
+          "description": ""
+        },
+        {
+          "element": "ord_qty",
+          "required": "Y",
+          "한글명": "주문수량",
+          "description": "단위: 1주"
+        },
+        {
+          "element": "ord_uv",
+          "required": "N",
+          "한글명": "주문단가",
+          "description": "단위: 원"
+        },
+        {
+          "element": "trde_tp",
+          "required": "Y",
+          "한글명": "매매구분",
+          "description": "0:보통 , 3:시장가 , 5:조건부지정가 , 81:장마감후시간외 , 61:장시작전시간외, 62:시간외단일가 , 6:최유리지정가 , 7:최우선지정가 , 10:보통(IOC) , 13:시장가(IOC) , 16:최유리(IOC) , 20:보통(FOK) , 23:시장가(FOK) , 26:최유리(FOK) , 28:스톱지정가,29:중간가,30:중간가(IOC),31:중간가(FOK)"
+        },
+        {
+          "element": "cond_uv",
+          "required": "N",
+          "한글명": "조건단가",
+          "description": "단위: 원"
+        }
+      ]
+    },
+    "kt10001": {
+      "name": "주식 매도주문(kt10001)",
+      "url": "/api/dostk/ordr",
+      "body": [
+        {
+          "element": "dmst_stex_tp",
+          "required": "Y",
+          "한글명": "국내거래소구분",
+          "description": "KRX,NXT,SOR"
+        },
+        {
+          "element": "stk_cd",
+          "required": "Y",
+          "한글명": "종목코드",
+          "description": ""
+        },
+        {
+          "element": "ord_qty",
+          "required": "Y",
+          "한글명": "주문수량",
+          "description": "단위: 1주"
+        },
+        {
+          "element": "ord_uv",
+          "required": "N",
+          "한글명": "주문단가",
+          "description": "단위: 원"
+        },
+        {
+          "element": "trde_tp",
+          "required": "Y",
+          "한글명": "매매구분",
+          "description": "0:보통 , 3:시장가 , 5:조건부지정가 , 81:장마감후시간외 , 61:장시작전시간외, 62:시간외단일가 , 6:최유리지정가 , 7:최우선지정가 , 10:보통(IOC) , 13:시장가(IOC) , 16:최유리(IOC) , 20:보통(FOK) , 23:시장가(FOK) , 26:최유리(FOK) , 28:스톱지정가,29:중간가,30:중간가(IOC),31:중간가(FOK)"
+        },
+        {
+          "element": "cond_uv",
+          "required": "N",
+          "한글명": "조건단가",
+          "description": "단위: 원"
+        }
+      ]
+    },
+    "kt10002": {
+      "name": "주식 정정주문(kt10002)",
+      "url": "/api/dostk/ordr",
+      "body": [
+        {
+          "element": "dmst_stex_tp",
+          "required": "Y",
+          "한글명": "국내거래소구분",
+          "description": "KRX,NXT,SOR"
+        },
+        {
+          "element": "orig_ord_no",
+          "required": "Y",
+          "한글명": "원주문번호",
+          "description": "매수/매도 주문 요청 응답 결과로 받은 7자리 주문번호"
+        },
+        {
+          "element": "stk_cd",
+          "required": "Y",
+          "한글명": "종목코드",
+          "description": ""
+        },
+        {
+          "element": "mdfy_qty",
+          "required": "Y",
+          "한글명": "정정수량",
+          "description": "단위: 1주, '0' 입력 시 잔량 전부 정정"
+        },
+        {
+          "element": "mdfy_uv",
+          "required": "Y",
+          "한글명": "정정단가",
+          "description": "단위: 원"
+        },
+        {
+          "element": "mdfy_cond_uv",
+          "required": "N",
+          "한글명": "정정조건단가",
+          "description": "단위: 원"
+        }
+      ]
+    },
+    "kt10003": {
+      "name": "주식 취소주문(kt10003)",
+      "url": "/api/dostk/ordr",
+      "body": [
+        {
+          "element": "dmst_stex_tp",
+          "required": "Y",
+          "한글명": "국내거래소구분",
+          "description": "KRX,NXT,SOR"
+        },
+        {
+          "element": "orig_ord_no",
+          "required": "Y",
+          "한글명": "원주문번호",
+          "description": "매수/매도 주문 요청 응답 결과로 받은 7자리 주문번호"
+        },
+        {
+          "element": "stk_cd",
+          "required": "Y",
+          "한글명": "종목코드",
+          "description": ""
+        },
+        {
+          "element": "cncl_qty",
+          "required": "Y",
+          "한글명": "취소수량",
+          "description": "단위: 1주, '0' 입력시 잔량 전부 취소"
+        }
+      ]
+    }
+  }
+}
