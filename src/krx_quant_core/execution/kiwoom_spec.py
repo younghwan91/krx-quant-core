@@ -17,8 +17,13 @@ scalp-it ``adapters/kiwoom_order.py`` 와 daytrade-it
   ``return_code == 2``** 다 — 취소 성공 사례가 없다(2026-11-02 로그 전수, 전에 여기 적었던
   "22건 전부 rc=0" 은 틀렸다). 즉 매수·매도 **바디 필드명**(``dmst_stex_tp``·``stk_cd``·
   ``ord_qty``·``ord_uv``·``trde_tp``)과 **값** ``dmst_stex_tp="KRX"``(``"01"`` 아님),
-  ``trde_tp="0"``(지정가, ``"00"`` 아님)은 실주문으로 확인됐고, **취소(``kt10003``·
-  ``org_ord_no``)는 확인되지 않았다.** 동시호가 주문과 2주 이상 주문 이력도 없다.
+  ``trde_tp="0"``(지정가, ``"00"`` 아님)은 실주문으로 확인됐고, **취소(``kt10003``)는
+  확인되지 않았다.** 동시호가 주문과 2주 이상 주문 이력도 없다.
+* 취소 14건이 실패한 바디는 ``{dmst_stex_tp, stk_cd, org_ord_no, ord_qty}`` 였다. 키움 공식
+  스펙 JSON(``Kiwoom-Securities/Kiwoom-REST-API`` c7a3d25, 2026-11-14 대조)의 kt10003 은
+  ``{dmst_stex_tp, orig_ord_no, stk_cd, cncl_qty}``(``cncl_qty="0"`` = 잔량 전부), 정정 kt10002 는
+  ``{dmst_stex_tp, orig_ord_no, stk_cd, mdfy_qty, mdfy_uv[, mdfy_cond_uv]}`` 다.
+  코어는 공식 필드명으로 바꿨지만 **실주문 취소 스모크로 확인되기 전까지 "미확인"** 이다.
 * 주문 바디에는 계좌번호가 **안 들어간다** — 토큰이 계좌에 묶여 있다.
 
 확인 안 된 것 — 시장가 매매구분
@@ -93,7 +98,7 @@ STKINFO_PATH = "/api/dostk/stkinfo"
 BUY_API_ID = "kt10000"
 #: 현금 매도. 실주문 확인.
 SELL_API_ID = "kt10001"
-#: 취소. 바디 ``{dmst_stex_tp, stk_cd, org_ord_no, ord_qty}``.
+#: 취소. 바디 ``{dmst_stex_tp, orig_ord_no, stk_cd, cncl_qty}`` — 공식 스펙 기준, 실주문 미확인.
 CANCEL_API_ID = "kt10003"
 #: 계좌번호조회. 빈 바디, 응답 ``acctNo``(10자리).
 ACCOUNT_NO_API_ID = "ka00001"

@@ -37,15 +37,22 @@ class OrderBlocked(Exception):
 def cancel_body(
     org_ord_no: str, code: str, qty: int, exchange: str = DEFAULT_EXCHANGE
 ) -> dict[str, str]:
-    """취소(``kt10003``) 바디. 원주문번호 필수, 수량은 문자열.
+    """취소(``kt10003``) 바디. 원주문번호 필수, 수량은 문자열(``"0"`` = 잔량 전부).
 
-    필드 순서까지 scalp-it ``KiwoomOrderClient.cancel`` 과 같다.
+    필드명·순서는 키움 공식 스펙(``Kiwoom-Securities/Kiwoom-REST-API``
+    ``kiwoom/_data/kiwoom_api_spec.json`` c7a3d25)의 kt10003 바디 그대로다:
+    ``dmst_stex_tp`` · ``orig_ord_no`` · ``stk_cd`` · ``cncl_qty``.
+    전에는 ``org_ord_no``·``ord_qty`` 를 보냈고 실주문 취소 14건이 모두 ``return_code == 2``
+    였다(scalp-it ``data/pair_orders.log``). 새 필드명은 **실주문 취소로는 아직 확인 전**이다 —
+    :mod:`.kiwoom_spec` 머리말 참고.
+
+    인자 이름 ``org_ord_no`` 는 호출부 호환을 위해 그대로 둔다.
     """
     return {
         "dmst_stex_tp": exchange,
+        "orig_ord_no": str(org_ord_no),
         "stk_cd": code,
-        "org_ord_no": str(org_ord_no),
-        "ord_qty": str(int(qty)),
+        "cncl_qty": str(int(qty)),
     }
 
 
@@ -131,4 +138,6 @@ class OrderResult:
             "blocked_reason": self.blocked_reason,
             "ord_no": self.ord_no,
             "return_code": self.return_code,
+            # 거부 사유가 있을 때만 — 없으면 키를 넣지 않아 기존 로그 줄은 그대로다.
+            **({"return_msg": self.return_msg} if self.return_msg else {}),
         }
