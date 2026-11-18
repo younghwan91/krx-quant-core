@@ -21,9 +21,17 @@ from datetime import datetime
 from types import MappingProxyType
 from typing import Any, ClassVar
 
-from .kiwoom_spec import BUY_API_ID, DEFAULT_EXCHANGE, SELL_API_ID, TRDE_TP_LIMIT
+from .kiwoom_spec import (
+    BUY_API_ID,
+    CANCEL_API_ID,
+    DEFAULT_EXCHANGE,
+    MODIFY_API_ID,
+    SELL_API_ID,
+    TRDE_TP_LIMIT,
+    validate_order_body,
+)
 
-__all__ = ["OrderBlocked", "OrderIntent", "OrderResult", "cancel_body"]
+__all__ = ["OrderBlocked", "OrderIntent", "OrderResult", "cancel_body", "modify_body"]
 
 
 class OrderBlocked(Exception):
@@ -37,16 +45,53 @@ class OrderBlocked(Exception):
 def cancel_body(
     org_ord_no: str, code: str, qty: int, exchange: str = DEFAULT_EXCHANGE
 ) -> dict[str, str]:
-    """취소(``kt10003``) 바디. 원주문번호 필수, 수량은 문자열.
+    """취소(``kt10003``) 바디. 원주문번호 필수, 수량은 문자열(``"0"`` = 잔량 전부).
 
-    필드 순서까지 scalp-it ``KiwoomOrderClient.cancel`` 과 같다.
+    필드명·순서는 키움 공식 스펙(``Kiwoom-Securities/Kiwoom-REST-API``
+    ``kiwoom/_data/kiwoom_api_spec.json`` c7a3d25)의 kt10003 바디 그대로다:
+    ``dmst_stex_tp`` · ``orig_ord_no`` · ``stk_cd`` · ``cncl_qty``.
+    전에는 ``org_ord_no``·``ord_qty`` 를 보냈고 실주문 취소 14건이 모두 ``return_code == 2``
+    였다(scalp-it ``data/pair_orders.log``). 새 필드명은 **실주문 취소로는 아직 확인 전**이다 —
+    :mod:`.kiwoom_spec` 머리말 참고.
+
+    인자 이름 ``org_ord_no`` 는 호출부 호환을 위해 그대로 둔다. 만든 바디는
+    :func:`~.kiwoom_spec.validate_order_body` 로 스펙 필드를 확인한 뒤 돌려준다.
     """
-    return {
+    body = {
         "dmst_stex_tp": exchange,
+        "orig_ord_no": str(org_ord_no),
         "stk_cd": code,
-        "org_ord_no": str(org_ord_no),
-        "ord_qty": str(int(qty)),
+        "cncl_qty": str(int(qty)),
     }
+    validate_order_body(CANCEL_API_ID, body)
+    return body
+
+
+def modify_body(
+    org_ord_no: str,
+    code: str,
+    qty: int,
+    price: int,
+    exchange: str = DEFAULT_EXCHANGE,
+    cond_price: int | None = None,
+) -> dict[str, str]:
+    """정정(``kt10002``) 바디. 수량·가격은 문자열(``qty=0`` → ``"0"`` = 잔량 전부 정정).
+
+    필드명·순서는 공식 스펙 kt10002 그대로다: ``dmst_stex_tp`` · ``orig_ord_no`` ·
+    ``stk_cd`` · ``mdfy_qty`` · ``mdfy_uv`` (+ 선택 ``mdfy_cond_uv``, ``cond_price`` 가
+    있을 때만). **실주문으로는 확인 전**이다 — :mod:`.kiwoom_spec` 머리말 참고.
+    """
+    body = {
+        "dmst_stex_tp": exchange,
+        "orig_ord_no": str(org_ord_no),
+        "stk_cd": code,
+        "mdfy_qty": str(int(qty)),
+        "mdfy_uv": str(int(price)),
+    }
+    if cond_price is not None:
+        body["mdfy_cond_uv"] = str(int(cond_price))
+    validate_order_body(MODIFY_API_ID, body)
+    return body
 
 
 @dataclass(frozen=True)
@@ -82,6 +127,10 @@ class OrderIntent:
     def cancel_body(self, org_ord_no: str) -> dict[str, str]:
         """이 intent 의 종목·수량·거래소로 만든 취소 바디."""
         return cancel_body(org_ord_no, self.code, self.qty, self.exchange)
+
+    def modify_body(self, org_ord_no: str) -> dict[str, str]:
+        """이 intent 의 종목·수량·가격·거래소로 만든 정정 바디(수량·가격 = 정정 후 값)."""
+        return modify_body(org_ord_no, self.code, self.qty, self.price, self.exchange)
 
     def describe(self) -> str:
         kind = "매수" if self.side == "buy" else "매도"
@@ -131,4 +180,6 @@ class OrderResult:
             "blocked_reason": self.blocked_reason,
             "ord_no": self.ord_no,
             "return_code": self.return_code,
+            # 거부 사유가 있을 때만 — 없으면 키를 넣지 않아 기존 로그 줄은 그대로다.
+            **({"return_msg": self.return_msg} if self.return_msg else {}),
         }

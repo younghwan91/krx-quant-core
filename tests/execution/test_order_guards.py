@@ -295,13 +295,16 @@ def test_intent_api_id_and_body():
 
 
 def test_cancel_body_exact():
+    # 공식 kt10003 바디(키움 공식 스펙 JSON, Kiwoom-Securities/Kiwoom-REST-API c7a3d25):
+    # dmst_stex_tp · orig_ord_no · stk_cd · cncl_qty. 옛 org_ord_no/ord_qty 는 실주문 14/14 rc=2.
     body = cancel_body("0539055", "294570", 1)
-    assert body == {"dmst_stex_tp": "KRX", "stk_cd": "294570",
-                    "org_ord_no": "0539055", "ord_qty": "1"}
-    assert list(body) == ["dmst_stex_tp", "stk_cd", "org_ord_no", "ord_qty"]
+    assert body == {"dmst_stex_tp": "KRX", "orig_ord_no": "0539055",
+                    "stk_cd": "294570", "cncl_qty": "1"}
+    assert list(body) == ["dmst_stex_tp", "orig_ord_no", "stk_cd", "cncl_qty"]
+    assert "org_ord_no" not in body and "ord_qty" not in body
     intent = OrderIntent(side="cancel", code="294570", qty=3, price=0, exchange="NXT")
-    assert intent.cancel_body(539055) == {"dmst_stex_tp": "NXT", "stk_cd": "294570",
-                                          "org_ord_no": "539055", "ord_qty": "3"}
+    assert intent.cancel_body("0539055") == {"dmst_stex_tp": "NXT", "orig_ord_no": "0539055",
+                                             "stk_cd": "294570", "cncl_qty": "3"}
 
 
 def test_describe_with_and_without_names():
@@ -331,6 +334,17 @@ def test_result_to_record():
         "blocked": False, "blocked_reason": "", "ord_no": "0539055", "return_code": 0,
     }
     assert "ts" in OrderResult(_buy("294570"), True, False).to_record()
+
+
+def test_result_to_record_keeps_return_msg_when_present():
+    # 취소 14건이 rc=2 로만 남고 사유가 사라졌다 — 메시지가 있으면 기록에 남긴다.
+    # 메시지가 없으면 키를 넣지 않아 기존 로그 줄은 글자 하나 안 바뀐다(위 테스트).
+    r = OrderResult(_buy("294570"), dry_run=False, submitted=True, return_code=2,
+                    return_msg="[2000](RC4007:필수입력값 누락)")
+    rec = r.to_record(datetime(2026, 9, 9, 9, 9, 58))
+    assert rec["return_code"] == 2
+    assert rec["return_msg"] == "[2000](RC4007:필수입력값 누락)"
+    assert "return_msg" not in OrderResult(_buy("294570"), True, False).to_record()
 
 
 def test_order_blocked_is_plain_exception_and_mixable():

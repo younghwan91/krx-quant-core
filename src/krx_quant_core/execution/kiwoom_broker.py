@@ -87,7 +87,13 @@ from typing import Any
 from ..market.codes import normalize_code
 from ..market.session import now_kst
 from .events import Fill, Holding, OpenOrder, normalize_ord_no
-from .kiwoom_spec import BALANCE_ROWS_KEY, UNFILLED_ROWS_KEY, strip_sign
+from .kiwoom_spec import (
+    BALANCE_ROWS_KEY,
+    CANCEL_API_ID,
+    UNFILLED_ROWS_KEY,
+    strip_sign,
+    validate_order_body,
+)
 from .orders import OrderIntent, OrderResult
 
 __all__ = ["KiwoomBroker"]
@@ -175,22 +181,35 @@ class KiwoomBroker:
     # ----- 제출/취소 — 재시도 없음 -------------------------------------------
 
     def submit(self, intent: OrderIntent) -> OrderResult:
-        """주문을 낸다. **재시도 없음.** ``dry_run`` 이면 POST 하지 않는다."""
+        """주문을 낸다. **재시도 없음.** ``dry_run`` 이면 POST 하지 않는다.
+
+        바디가 공식 스펙 필드와 안 맞으면(:func:`~.kiwoom_spec.validate_order_body`) POST 전에
+        :class:`~.kiwoom_spec.InvalidOrderBody` 를 올린다 — dry-run 이어도.
+        """
+        # 바디 검사는 dry-run 보다 먼저 — 틀린 필드명은 dry-run 에서도 드러나야 한다.
+        # 실패하면 InvalidOrderBody 를 올린다(아무것도 안 나갔다). 재시도와 무관하다.
+        body = intent.body()
+        validate_order_body(intent.api_id(), body)
         if self._dry_run:
             return OrderResult(intent=intent, dry_run=True, submitted=False)
         fn = self._api.order.buy_order if intent.side == "buy" else self._api.order.sell_order
         try:
-            resp = fn(**intent.body())
+            resp = fn(**body)
         except Exception as exc:  # noqa: BLE001 — 어떤 예외든 결과로 감싼다. 재시도 안 함.
             return self._result_from_exception(intent, exc, fallback_ord_no=None)
         return self._result_from_response(intent, resp, fallback_ord_no=None)
 
     def cancel(self, ord_no: str, intent: OrderIntent) -> OrderResult:
-        """미체결 주문을 취소한다. **재시도 없음.** ``dry_run`` 이면 POST 하지 않는다."""
+        """미체결 주문을 취소한다. **재시도 없음.** ``dry_run`` 이면 POST 하지 않는다.
+
+        바디 검사는 :meth:`submit` 과 같다(kt10003 필드).
+        """
+        body = intent.cancel_body(ord_no)
+        validate_order_body(CANCEL_API_ID, body)  # 서브클래스가 바디를 바꿔도 여기서 막힌다
         if self._dry_run:
             return OrderResult(intent=intent, dry_run=True, submitted=False)
         try:
-            resp = self._api.order.cancel_order(**intent.cancel_body(ord_no))
+            resp = self._api.order.cancel_order(**body)
         except Exception as exc:  # noqa: BLE001 — 재시도 안 함, 결과로 감싼다.
             return self._result_from_exception(intent, exc, fallback_ord_no=str(ord_no))
         return self._result_from_response(intent, resp, fallback_ord_no=str(ord_no))
