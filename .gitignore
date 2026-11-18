@@ -5,8 +5,9 @@ dist/
 .pytest_cache/
 .ruff_cache/
 
-# 에이전트 스킬 본체는 skills-lock.json 으로 복원한다: npx skills experimental_install -a claude-code
+# 에이전트 스킬 본체는 skills-lock.json 으로 복원한다(본체는 .agents/skills/, .claude/skills/ 는 링크): npx skills experimental_install -a claude-code
 .claude/skills/
+.agents/
 # archify 기본 작업 폴더(초안·리뷰 영수증)
 .archify/
 # archify 영수증(로컬 절대경로가 들어간다) — 후보 JSON 과 HTML 만 커밋
