@@ -49,6 +49,11 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/krx_quant_core"]
 
+# sdist 는 include 목록이 없으면 .gitignore 안 된 파일을 전부 싣는다 — .claude/(에이전트 스킬)·CLAUDE.md·docs 까지.
+# 여기 고치면 scripts/check_release.py 의 SDIST_ALLOWED 도 같이.
+[tool.hatch.build.targets.sdist]
+include = ["src/krx_quant_core", "tests", "README.md", "LICENSE"]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100

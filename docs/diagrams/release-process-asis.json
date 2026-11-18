@@ -1,0 +1,123 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "krx-quant-core 릴리스 프로세스 (개선 전)",
+    "locale": "ko",
+    "quality_profile": "showcase",
+    "output": "docs/diagrams/release-process-asis.html",
+    "repository": {
+      "url": "https://github.com/younghwan91/krx-quant-core.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "a8d6ffb41d576f9e5dd50fbc7cfb40253c137f66"
+    }
+  },
+  "lanes": [
+    { "id": "dev", "label": "개발자 (로컬)" },
+    { "id": "actions", "label": "GitHub Actions" },
+    { "id": "consumers", "label": "소비 레포" },
+    { "id": "gaps", "label": "빈틈", "variant": "exception" }
+  ],
+  "mainPath": ["feat", "bump", "tagpush", "publish", "pypi", "pinpr", "pins"],
+  "nodes": [
+    {
+      "id": "feat", "lane": "dev", "col": 0, "type": "frontend",
+      "label": "기능 PR 머지", "sublabel": "main 으로",
+      "sources": [{ "path": "CLAUDE.md", "line": 22, "end_line": 22, "label": "릴리스 1단계" }]
+    },
+    {
+      "id": "bump", "lane": "dev", "col": 1, "type": "frontend",
+      "label": "버전 올림 커밋", "sublabel": "네 곳을 손으로", "tag": "pyproject·__init__·README·lock",
+      "sources": [
+        { "path": "CLAUDE.md", "line": 22, "end_line": 23, "label": "네 곳 동시 수정 규칙" },
+        { "path": "pyproject.toml", "line": 3, "end_line": 3 },
+        { "path": "src/krx_quant_core/__init__.py", "line": 8, "end_line": 8 }
+      ]
+    },
+    {
+      "id": "tagpush", "lane": "dev", "col": 2, "type": "frontend",
+      "label": "태그 push", "sublabel": "git tag -a vX.Y.Z",
+      "sources": [{ "path": "CLAUDE.md", "line": 24, "end_line": 25 }]
+    },
+    {
+      "id": "ci", "lane": "actions", "col": 1, "type": "backend",
+      "label": "ci.yml", "sublabel": "ruff + pytest 3.11~3.13",
+      "sources": [{ "path": ".github/workflows/ci.yml", "line": 1, "end_line": 44 }]
+    },
+    {
+      "id": "publish", "lane": "actions", "col": 3, "type": "backend",
+      "label": "publish.yml", "sublabel": "v* 태그면 바로 build",
+      "sources": [{ "path": ".github/workflows/publish.yml", "line": 1, "end_line": 30 }]
+    },
+    {
+      "id": "pypi", "lane": "actions", "col": 4, "type": "cloud",
+      "label": "PyPI", "sublabel": "되돌릴 수 없다",
+      "sources": [{ "path": ".github/workflows/publish.yml", "line": 32, "end_line": 33 }]
+    },
+    {
+      "id": "pinpr", "lane": "consumers", "col": 4, "type": "frontend",
+      "label": "핀 올림 PR", "sublabel": "==X.Y.Z + uv lock",
+      "sources": [{ "path": "CLAUDE.md", "line": 26, "end_line": 27 }]
+    },
+    {
+      "id": "pins", "lane": "consumers", "col": 5, "type": "backend",
+      "label": "kqc pins", "sublabel": "__version__ 과 비교",
+      "sources": [
+        { "path": "src/krx_quant_core/runtime/pins.py", "line": 100, "end_line": 119 },
+        { "path": "src/krx_quant_core/runtime/cli.py", "line": 199, "end_line": 201 }
+      ]
+    },
+    {
+      "id": "nosync", "lane": "gaps", "col": 1, "type": "security",
+      "label": "동기 검사 없음", "sublabel": "v0.2.0~0.4.2 가 0.1.1 로",
+      "sources": [
+        { "path": "pyproject.toml", "line": 3, "end_line": 3 },
+        { "path": "src/krx_quant_core/__init__.py", "line": 8, "end_line": 8 },
+        { "path": "README.md", "line": 24, "end_line": 44 }
+      ]
+    },
+    {
+      "id": "nogate", "lane": "gaps", "col": 3, "type": "security",
+      "label": "게이트 없음", "sublabel": "태그·main·테스트 미확인",
+      "sources": [{ "path": ".github/workflows/publish.yml", "line": 3, "end_line": 30 }]
+    },
+    {
+      "id": "sdistall", "lane": "gaps", "col": 4, "type": "security",
+      "label": "sdist 전부 포함", "sublabel": ".claude·CLAUDE.md 까지",
+      "sources": [{ "path": "pyproject.toml", "line": 45, "end_line": 50 }]
+    }
+  ],
+  "edges": [
+    { "id": "e-feat-bump", "from": "feat", "to": "bump" },
+    { "id": "e-bump-tag", "from": "bump", "to": "tagpush" },
+    { "id": "e-tag-publish", "from": "tagpush", "to": "publish", "label": "v* push", "variant": "emphasis" },
+    { "id": "e-publish-pypi", "from": "publish", "to": "pypi", "label": "upload", "variant": "emphasis" },
+    { "id": "e-pypi-pinpr", "from": "pypi", "to": "pinpr", "label": "설치" },
+    { "id": "e-pinpr-pins", "from": "pinpr", "to": "pins" },
+    { "id": "e-bump-ci", "from": "bump", "to": "ci", "label": "push main", "variant": "dashed", "role": "async" },
+    { "id": "e-bump-nosync", "from": "ci", "to": "nosync", "label": "버전 안 봄", "variant": "security", "role": "error" },
+    { "id": "e-publish-nogate", "from": "publish", "to": "nogate", "label": "CI 안 기다림", "variant": "security", "role": "error" },
+    { "id": "e-pypi-sdist", "from": "pypi", "to": "sdistall", "label": "sdist", "variant": "security", "role": "error" }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "확인된 사고",
+      "items": [
+        "태그 v0.2.0~v0.4.2 다섯 번: pyproject 는 올랐는데 __version__ 은 0.1.1 그대로 배포",
+        "그동안 kqc pins 의 기준(__version__)도 0.1.1 — 뒤처진 소비 레포를 못 잡는다",
+        "v0.8.0: 같은 커밋의 CI 시작 7초 뒤 publish 시작 — 테스트 결과와 무관하게 업로드",
+        "release 환경에 보호 규칙·브랜치 제한 없음 — main 밖 커밋의 v* 태그도 배포된다"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "sdist 내용",
+      "items": [
+        "hatch sdist 에 include 목록이 없어 .gitignore 안 된 파일 전부가 들어간다",
+        "archify 설치 뒤 sdist: .claude/ 203개 파일, 5.6MB · CLAUDE.md(호스트 운영 메모)"
+      ]
+    }
+  ]
+}
