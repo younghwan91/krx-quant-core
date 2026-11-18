@@ -1,0 +1,116 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "krx-quant-core 릴리스 프로세스 (개선 후)",
+    "locale": "ko",
+    "quality_profile": "showcase",
+    "output": "docs/diagrams/release-process.html",
+    "repository": {
+      "url": "https://github.com/younghwan91/krx-quant-core.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "45682b6318533a4eb499f297bc20cb57a208c78e"
+    }
+  },
+  "lanes": [
+    { "id": "dev", "label": "개발자 (로컬)" },
+    { "id": "actions", "label": "GitHub Actions" },
+    { "id": "consumers", "label": "소비 레포" },
+    { "id": "stop", "label": "멈춤", "variant": "exception" }
+  ],
+  "mainPath": ["feat", "bump", "tagpush", "verify", "build", "pypi", "pinpr", "pins"],
+  "nodes": [
+    {
+      "id": "feat", "lane": "dev", "col": 0, "type": "frontend",
+      "label": "기능 PR 머지", "sublabel": "main 으로",
+      "sources": [{ "path": "CLAUDE.md", "line": 22, "end_line": 22 }]
+    },
+    {
+      "id": "bump", "lane": "dev", "col": 1, "type": "frontend",
+      "label": "버전 올림 커밋", "sublabel": "check_release.py 로 대조",
+      "sources": [
+        { "path": "CLAUDE.md", "line": 22, "end_line": 25 },
+        { "path": "scripts/check_release.py", "line": 33, "end_line": 57, "label": "네 곳 대조" }
+      ]
+    },
+    {
+      "id": "tagpush", "lane": "dev", "col": 2, "type": "frontend",
+      "label": "태그 push", "sublabel": "git tag -a vX.Y.Z",
+      "sources": [{ "path": "CLAUDE.md", "line": 26, "end_line": 29 }]
+    },
+    {
+      "id": "ci", "lane": "actions", "col": 1, "type": "backend",
+      "label": "ci.yml", "sublabel": "+ release-check 잡",
+      "sources": [
+        { "path": ".github/workflows/ci.yml", "line": 20, "end_line": 30 },
+        { "path": "tests/test_release_consistency.py", "line": 30, "end_line": 37 }
+      ]
+    },
+    {
+      "id": "verify", "lane": "actions", "col": 2, "type": "security",
+      "label": "verify 잡", "sublabel": "main 위·태그=버전·pytest",
+      "sources": [{ "path": ".github/workflows/publish.yml", "line": 14, "end_line": 41 }]
+    },
+    {
+      "id": "build", "lane": "actions", "col": 3, "type": "backend",
+      "label": "build", "sublabel": "sdist 허용 목록 검사",
+      "sources": [
+        { "path": ".github/workflows/publish.yml", "line": 43, "end_line": 68 },
+        { "path": "pyproject.toml", "line": 52, "end_line": 55, "label": "sdist include" },
+        { "path": "scripts/check_release.py", "line": 28, "end_line": 30 }
+      ]
+    },
+    {
+      "id": "pypi", "lane": "actions", "col": 4, "type": "cloud",
+      "label": "PyPI", "sublabel": "되돌릴 수 없다",
+      "sources": [{ "path": ".github/workflows/publish.yml", "line": 70, "end_line": 71 }]
+    },
+    {
+      "id": "pinpr", "lane": "consumers", "col": 4, "type": "frontend",
+      "label": "핀 올림 PR", "sublabel": "==X.Y.Z + uv lock",
+      "sources": [{ "path": "CLAUDE.md", "line": 30, "end_line": 31 }]
+    },
+    {
+      "id": "pins", "lane": "consumers", "col": 5, "type": "backend",
+      "label": "kqc pins", "sublabel": "__version__ 과 비교",
+      "sources": [{ "path": "src/krx_quant_core/runtime/pins.py", "line": 100, "end_line": 119 }]
+    },
+    {
+      "id": "halt", "lane": "stop", "col": 3, "type": "security",
+      "label": "업로드 안 함", "sublabel": "job 실패로 끝",
+      "sources": [{ "path": ".github/workflows/publish.yml", "line": 31, "end_line": 44 }]
+    }
+  ],
+  "edges": [
+    { "id": "e-feat-bump", "from": "feat", "to": "bump" },
+    { "id": "e-bump-tag", "from": "bump", "to": "tagpush" },
+    { "id": "e-tag-verify", "from": "tagpush", "to": "verify", "label": "v* push", "variant": "emphasis" },
+    { "id": "e-verify-build", "from": "verify", "to": "build", "label": "needs", "variant": "emphasis" },
+    { "id": "e-build-pypi", "from": "build", "to": "pypi", "label": "upload", "variant": "emphasis" },
+    { "id": "e-pypi-pinpr", "from": "pypi", "to": "pinpr", "label": "설치" },
+    { "id": "e-pinpr-pins", "from": "pinpr", "to": "pins" },
+    { "id": "e-bump-ci", "from": "bump", "to": "ci", "label": "push main", "variant": "dashed", "role": "async" },
+    { "id": "e-verify-halt", "from": "verify", "to": "halt", "label": "하나라도 어긋남", "variant": "security", "role": "error" },
+    { "id": "e-build-halt", "from": "build", "to": "halt", "label": "허용 밖 파일", "variant": "security", "role": "error" }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "고친 것",
+      "items": [
+        "버전 네 곳 대조: 테스트·CI release-check·publish 가 같은 scripts/check_release.py 를 쓴다",
+        "publish 는 verify(태그가 main 위·태그=버전·pytest numba/폴백) 통과 뒤에만 돈다",
+        "sdist 는 src·tests·README·LICENSE 만 — 5.6MB → 404KB, .claude·CLAUDE.md 제외"
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "그대로 남은 것",
+      "items": [
+        "소비 레포 핀 올림 PR 과 kqc pins 확인은 사람 몫(크론 체크아웃은 기본 체크아웃만 본다)",
+        "GitHub 설정(main 보호·release 환경 승인자)은 바꾸지 않았다 — 워크플로 안 검사로 대신한다"
+      ]
+    }
+  ]
+}
