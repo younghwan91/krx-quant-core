@@ -21,8 +21,12 @@ CI(`.github/workflows/ci.yml`)는 3.11~3.13 × `[dev,fast]` + numba 없는 `[dev
 
 1. 기능 PR 머지 뒤 버전 올림 커밋: `pyproject.toml` `version`, `src/krx_quant_core/__init__.py` `__version__`,
    `README.md` 설치 줄(`==X.Y.Z`·`@vX.Y.Z`), `uv lock` — 네 곳을 같이 바꾼다(예: 830f1c2, fe3860f).
+   `python scripts/check_release.py` 가 네 곳을 대조한다(테스트·CI `release-check` 도 같은 검사 — v0.2.0~v0.4.2 가
+   `__version__` 0.1.1 로 나간 사고 때문).
 2. main 에서 `git tag -a vX.Y.Z -m "..."` → `git push origin vX.Y.Z` → `publish.yml` 이 PyPI 에 올린다. **되돌릴 수 없다** —
-   사용자가 배포를 지시했을 때만.
+   사용자가 배포를 지시했을 때만. publish.yml 은 올리기 전에 태그가 main 위인지·태그=버전·테스트(numba/폴백 둘 다)·
+   sdist 허용 목록을 직접 확인하고, 하나라도 어긋나면 업로드하지 않는다. sdist 에 싣는 것은 pyproject
+   `[tool.hatch.build.targets.sdist]` 의 include 와 `check_release.py` 의 `SDIST_ALLOWED` 를 같이 고친다.
 3. 소비 레포마다 `krx-quant-core==X.Y.Z` + `uv lock` PR, 그 레포 테스트 통과 뒤 머지, 끝에 `uv run kqc pins` 가 green.
    방금 올린 직후엔 PyPI simple index 지연으로 소비 레포 CI 가 실패할 수 있다 — 재실행하면 된다(v0.7.0 때 swing-it).
 - `kqc pins` 는 `~/git/<repo>` **기본 체크아웃만** 본다. 워크트리(`swing-it-*` 등)와 `quant-airflow/docker/requirements.txt`
@@ -52,3 +56,7 @@ CI(`.github/workflows/ci.yml`)는 3.11~3.13 × `[dev,fast]` + numba 없는 `[dev
 
 - `docs/superpowers/specs/` — 버전별 설계(왜 이렇게 만들었나). 해당 모듈을 크게 바꿀 때 먼저 읽는다.
 - `docs/superpowers/plans/` — 구현 계획 기록.
+- `docs/diagrams/` — archify 로 그린 프로세스 그래프(후보 `*.json` 이 원본, `*.html` 은 렌더 결과). 스킬은
+  `npx skills experimental_install -a claude-code` 로 `skills-lock.json` 에서 복원한다(`.claude/skills/` 는 gitignore).
+  다시 렌더: `node .claude/skills/archify/bin/archify.mjs finalize workflow <json> <html> --repo-root . --quality showcase`
+  (이 머신은 Chromium 샌드박스가 막혀 browser-check 에 `--no-sandbox` 래퍼를 `ARCHIFY_CHROME` 으로 준다).

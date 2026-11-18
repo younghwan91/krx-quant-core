@@ -17,6 +17,18 @@ jobs:
       - run: pip install ruff==0.16.2
       - run: ruff check src/ tests/
 
+  release-check:
+    # 버전 네 곳(pyproject·__init__·README·uv.lock)과 sdist 내용 — publish.yml 이 태그 때 다시 본다.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build --sdist
+      - run: python scripts/check_release.py --sdist dist/*.tar.gz
+
   test:
     runs-on: ubuntu-latest
     strategy:

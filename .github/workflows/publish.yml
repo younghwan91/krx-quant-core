@@ -5,8 +5,43 @@ on:
     tags:
       - "v*"
 
+# PyPI 업로드는 되돌릴 수 없다. 그래서 올리기 전에 이 워크플로 안에서 직접 확인한다:
+# 태그가 main 위에 있는가 · 태그 = 버전 네 곳 · 테스트 통과 · sdist 내용.
+# (전에는 태그만 보고 바로 올렸다 — v0.8.0 은 같은 커밋의 CI 시작 7초 뒤에 업로드가 시작됐고,
+#  v0.2.0~v0.4.2 는 __version__ 이 0.1.1 인 채로 나갔다. release 환경엔 보호 규칙이 없다.)
+
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        # numba 경로와 순수 파이썬 폴백이 같은 골든을 통과해야 한다(ci.yml 과 같은 두 설치).
+        extras: ["dev,fast,portfolio", "dev"]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: 태그 커밋이 main 에 있는가
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "::error::$GITHUB_REF_NAME 은 main 밖 커밋($GITHUB_SHA)이다"; exit 1; }
+
+      - name: 태그 = 버전 네 곳
+        run: python scripts/check_release.py --tag "$GITHUB_REF_NAME"
+
+      - run: pip install -e ".[${{ matrix.extras }}]"
+      - run: pytest -q
+
   publish:
+    needs: verify
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -28,6 +63,9 @@ jobs:
 
       - name: Build
         run: python -m build
+
+      - name: sdist 내용 검사
+        run: python scripts/check_release.py --tag "$GITHUB_REF_NAME" --sdist dist/*.tar.gz
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
