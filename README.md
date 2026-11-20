@@ -66,8 +66,8 @@ pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@
 
 | 소비자 | 매매 스타일 | 실행 | 이 패키지에서 쓰는 것 |
 |---|---|---|---|
-| [scalp-it](https://github.com/younghwan91) (비공개) | 스캘핑 | 자동 실주문 | 호가·상한가·주문 가드·호가 스윕·체결 규칙·호스트 가드 |
-| [daytrade-it](https://github.com/younghwan91) (비공개) | 데이트레이딩 | 자동 실주문 | 비용모델·공시 리스크 게이트·DART DB·코드 정규화·호스트 가드 |
+| [scalp-it](https://github.com/younghwan91/scalp-it) | 스캘핑 | 자동 실주문 | 호가·상한가·주문 가드·호가 스윕·체결 규칙·호스트 가드 |
+| [daytrade-it](https://github.com/younghwan91/daytrade-it) | 데이트레이딩 | 자동 실주문 | 비용모델·공시 리스크 게이트·DART DB·코드 정규화·호스트 가드 |
 | [swing-it](https://github.com/younghwan91/swing-it) | 스윙 | 리서치 + 수동 체결 | DSR·purged CV·부트스트랩·취약성 진단·횡단면 시뮬·진화 엔진, 연구 경로에서 위험모델·최적화 층 |
 
 ## 왜 따로 뺐나
