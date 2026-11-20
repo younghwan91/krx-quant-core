@@ -21,7 +21,7 @@
 ## Quick start
 
 ```bash
-pip install krx-quant-core==0.8.0            # extras: [fast] numba · [opt] optuna · [db] psycopg · [evo] cmaes
+pip install krx-quant-core==0.9.0            # extras: [fast] numba · [opt] optuna · [db] psycopg · [evo] cmaes
 ```
 
 ```python
@@ -59,8 +59,6 @@ pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@
 | `portfolio/` | `optimize` — 팩터 위험모델 위의 제약 평균-분산 최적화(선형·3/2 제곱 거래비용). `[portfolio]` extra(cvxpy) 필요 |
 | `research/` | `run_sweep`(격자·병렬·캐시), `optuna_search`, `evolve`(탐색 공간·BIPOP CMAwM·세대 프로토콜·짝 레이싱·봉인) |
 | `runtime/` | 호스트 가드, 실행 기록 `start_run`, OOS 하드 잠금, `kqc` CLI(원격 실행·`nightly`·`pins`) |
-
-`portfolio/`·`factor_model`·`attribution`·`impact`·`risk_inputs`·`stats.ic` 는 v0.8.0 태그 뒤에 들어와 아직 main 에만 있다 — 쓰려면 main 의 커밋에 고정해 설치한다.
 
 쓰는 쪽은 전략 레포들이다. 각자 `krx-quant-core==X.Y.Z` 로 정확히 핀해 받는다.
 
