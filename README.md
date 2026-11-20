@@ -40,8 +40,8 @@ Python ≥ 3.11. 필수 의존성은 `kiwoom-client`(호가단위 표의 정본)
 `[fast]` 가 없으면 같은 커널을 파이썬으로 돌려 같은 숫자를 낸다.
 
 ```bash
-# PyPI 릴리스 전(또는 태그 고정 개발 중)에는 git 태그로:
-pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@v0.8.0"
+# 릴리스 전 기능이 필요하면 main 의 커밋에 고정해서:
+pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@<커밋 sha>"
 ```
 
 ## 무엇이 들어 있나
@@ -388,7 +388,7 @@ res.best_payload, res.best_value, res.uniq, res.restarts, res.top(5)
 
 ```bash
 uv sync --extra dev                      # + --extra fast(numba) --extra opt(optuna) --extra db(psycopg) --extra evo(cmaes)
-uv run pytest -q                         # 950+ tests, 1분 안팎
+uv run pytest -q                         # 1분 안팎
 uv run ruff check src tests
 KRX_QUANT_CORE_DISABLE_NUMBA=1 uv run --extra dev --extra fast pytest -q   # numba 있어도 파이썬 폴백 경로로
 ```
