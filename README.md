@@ -1,11 +1,15 @@
-# krx-quant-core
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/brand/wordmark-dark.svg">
+  <img alt="krx-quant-core" src="docs/images/brand/wordmark-light.svg" height="56">
+</picture>
 
-**한국 주식 퀀트 시스템이 시장 규칙을 한 군데서 맞추는 공통 코어.** 상·하한가는 대칭이 아니고,
-거래세는 시행일마다 다르고, 표본 외 구간은 한 번만 연다. 전략은 여기 없다.
+**한국어** | [English](README.en.md)
+
+**한국 주식 퀀트 시스템이 시장 규칙을 한 군데서 맞추는 공통 코어.** 상·하한가는 대칭이 아니고, 거래세는 시행일마다 다르고, 표본 외 구간은 한 번만 연다. 전략은 여기 없다.
 
 [![CI](https://github.com/younghwan91/krx-quant-core/actions/workflows/ci.yml/badge.svg)](https://github.com/younghwan91/krx-quant-core/actions/workflows/ci.yml)
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-younghwan--chae-0A66C2?logo=linkedin&logoColor=white)](https://www.linkedin.com/in/younghwan-chae/)
 
 <picture>
