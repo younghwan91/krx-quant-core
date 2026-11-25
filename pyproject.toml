@@ -6,14 +6,28 @@ readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
 authors = [{ name = "Younghwan Chae", email = "chyohw97@gmail.com" }]
-keywords = ["krx", "kospi", "kosdaq", "quant", "backtest", "trading", "kiwoom"]
+keywords = [
+    "krx", "kospi", "kosdaq", "korea", "korean-stock", "quant", "backtest", "trading",
+    "kiwoom", "tick-size", "price-limit", "transaction-tax", "transaction-cost",
+    "deflated-sharpe", "walk-forward", "algorithmic-trading", "한국주식", "호가단위", "증권거래세",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
     "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Natural Language :: Korean",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Office/Business :: Financial :: Investment",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
 ]
 dependencies = [
     # 호가단위 표의 정본은 kiwoom-client 에 있다 — 여기서 다시 정의하지 않는다.
@@ -41,6 +55,10 @@ kqc = "krx_quant_core.runtime.cli:main"
 [project.urls]
 Homepage = "https://github.com/younghwan91/krx-quant-core"
 Repository = "https://github.com/younghwan91/krx-quant-core"
+Documentation = "https://github.com/younghwan91/krx-quant-core/blob/main/docs/guide.md"
+Issues = "https://github.com/younghwan91/krx-quant-core/issues"
+Changelog = "https://github.com/younghwan91/krx-quant-core/tags"
+"README (English)" = "https://github.com/younghwan91/krx-quant-core/blob/main/README.en.md"
 
 [build-system]
 requires = ["hatchling"]

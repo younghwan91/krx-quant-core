@@ -7,11 +7,12 @@
 
 # krx-quant-core
 
-**A shared core where Korean equity quant systems align on market rules in one place.**
+**Korean stock tick sizes, price limits, and transaction taxes, computed correctly for each trade date.**
 
-Upper and lower price limits are asymmetric, transaction taxes vary by effective date, and out-of-sample windows open only once. No strategies live here.
+A shared core where KOSPI/KOSDAQ quant systems align on market rules in one place. Upper and lower price limits are asymmetric, transaction taxes vary by effective date, and out-of-sample windows open only once. No strategies live here.
 
 [![CI](https://github.com/younghwan91/krx-quant-core/actions/workflows/ci.yml/badge.svg)](https://github.com/younghwan91/krx-quant-core/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/krx-quant-core.svg)](https://pypi.org/project/krx-quant-core/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-younghwan--chae-0A66C2?logo=linkedin&logoColor=white)](https://www.linkedin.com/in/younghwan-chae/)
@@ -56,6 +57,24 @@ Requires Python 3.11 or later. Required dependencies are only `kiwoom-client` (c
 pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@<commit-sha>"
 ```
 
+## Why It Matters
+
+These are the pitfalls that quietly skew Korean backtests and order code. Each one is a single function call here.
+
+| Pitfall | Hand-rolled result | This package |
+|---|---|---|
+| One constant for transaction tax | The sell-side rate was 0.18% in 2024, 0.15% in 2025, and 0.20% in 2026. Running 2026 trades at the 2025 rate understates every sell by 0.05%p | `tax_rate(date, market)` picks that day's rate from the effective-date table |
+| Lower limit computed symmetrically | From a 239,000 KRW base, the symmetric formula (base × 0.7 rounded up to that band's tick) gives 167,300 KRW, but the real limit-down is 167,500 KRW. Of 130 empirical rows where the rules diverge, it matched only 25 | `limit_down_price` truncates the width with the base price's tick (matched 105) |
+| Moving n ticks as "price + n × current tick" | Two ticks above 49,950 KRW is not 50,050 KRW: at 50,000 KRW and up the tick is 100 KRW, so the order is rejected | `shift_ticks(49_950, 2)` crosses the band boundary and returns 50,100 |
+| Copying the tick table into each repo | One boundary off by one means rejected orders or wrong limit-up calls | The canonical table lives in [kiwoom-client](https://github.com/younghwan91/kiwoom-client), which places real orders; this package only derives from it |
+| Treating tickers as numbers | Stripping the new alphanumeric code `0155E0` to digits yields a different company | `normalize_code("0155E0")` keeps `0155E0`; `normalize_code("5930")` returns `005930` |
+
+**Scope and sources:**
+
+- The tick table is the one after the 2023-01-25 tick-size reform (unified across KOSPI, KOSDAQ, KONEX). Low KOSDAQ bands differed before that date, so it does not fit pre-2023-01-25 data. Sources are KRX reform notices and broker notices (`kiwoom_client.tick_size` docstring).
+- Price limits follow the ±30% rule in force since 2015-06-15. On days when the base price is not the previous close (ex-rights, new listings), the caller must pass the base price.
+- The 2026-01-01 tax increase was confirmed from reporting on the Ministry of Economy and Finance decree amendment. Earlier steps come from secondary sources and have not yet been checked against the statute text (law.go.kr). The KONEX rate is unverified and modeled the same as KOSDAQ ([tax table](docs/guide.en.md#transaction-tax-schedule-on-sell)).
+
 ## What's Inside
 
 | Module | Purpose |
@@ -90,6 +109,15 @@ Three repositories each maintained their own copies of the same rules, and they 
 - **Missing lower limits**: There was no lower-limit calculation; symmetric formulas get it wrong.
 
 Four design principles govern the core: **numerical parity** on migration against original code, **no pass/fail judgments** from statistical functions, **explicitly flagging unverified broker fields** (`False` defaults), and **never revoking shared app-key tokens** on disconnect.
+
+## Works Well With
+
+| Repo | What it does |
+|---|---|
+| [kiwoom-client](https://github.com/younghwan91/kiwoom-client) | Python client for the Kiwoom REST API — 182 endpoints, real-time WebSocket, MCP server; holds the canonical tick table this package uses |
+| [krx-news-client](https://github.com/younghwan91/krx-news-client) | Korean stock news and DART disclosures in one schema |
+| [kiwoom-order-guard](https://github.com/younghwan91/kiwoom-order-guard) | Claude Code hook that checks orders an AI agent sends through Kiwoom MCP/plugins before they go out |
+| [fin-checkup](https://github.com/younghwan91/fin-checkup) | Traffic-light view of 17 financial metrics for Korean listed companies, each with its formula and thresholds; measurements only, not investment advice |
 
 ## Docs
 
