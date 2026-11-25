@@ -7,11 +7,12 @@
 
 # krx-quant-core
 
-**한국 주식 퀀트 시스템이 시장 규칙을 한 군데서 맞추는 공통 코어입니다.**
+**한국 주식 호가단위·상·하한가·거래세를 거래일 기준으로 정확히 계산합니다.**
 
-상·하한가는 대칭이 아니고, 거래세는 시행일마다 다르며, 표본 외 구간은 한 번만 엽니다. 전략 코드는 포함하지 않습니다.
+KOSPI·KOSDAQ 퀀트 시스템이 시장 규칙을 한 군데서 맞추는 공통 코어입니다. 상·하한가는 대칭이 아니고, 거래세는 시행일마다 다르며, 표본 외 구간은 한 번만 엽니다. 전략 코드는 포함하지 않습니다.
 
 [![CI](https://github.com/younghwan91/krx-quant-core/actions/workflows/ci.yml/badge.svg)](https://github.com/younghwan91/krx-quant-core/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/krx-quant-core.svg)](https://pypi.org/project/krx-quant-core/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-younghwan--chae-0A66C2?logo=linkedin&logoColor=white)](https://www.linkedin.com/in/younghwan-chae/)
@@ -56,6 +57,24 @@ Python 3.11 이상이 필요합니다. 필수 의존성은 `kiwoom-client`(호�
 pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@<커밋 sha>"
 ```
 
+## 왜 필요한가
+
+한국 주식 백테스트·주문 코드에서 조용히 숫자를 틀리게 만드는 함정들입니다. 이 패키지는 각각을 함수 하나로 막습니다.
+
+| 함정 | 손으로 짜면 | 이 패키지 |
+|---|---|---|
+| 거래세를 상수 하나로 둔다 | 매도 세율이 2024년 0.18%, 2025년 0.15%, 2026년 0.20%로 바뀌었습니다. 2025년 세율로 2026년 거래를 돌리면 매도마다 0.05%p를 덜 뺍니다 | `tax_rate(날짜, 시장)`이 시행일 표에서 그날 세율을 고릅니다 |
+| 하한가를 상한가와 대칭으로 계산한다 | 기준가 239,000원의 하한가를 대칭식(기준가×0.7을 그 가격대 틱으로 올림)으로 구하면 167,300원이 나오지만 실제는 167,500원입니다. 규칙이 갈리는 실측 130행 중 대칭식은 25행만 맞았습니다 | `limit_down_price`는 기준가의 호가단위로 폭을 절사합니다(105행 일치) |
+| 틱을 "가격 + n × 지금 호가단위"로 옮긴다 | 49,950원에서 2틱 위를 50,050원으로 잡으면 50,000원 이상 구간(호가단위 100원)에서 유효하지 않은 호가라 주문이 거부됩니다 | `shift_ticks(49_950, 2)`는 밴드 경계를 넘으며 50,100원을 돌려줍니다 |
+| 호가단위 표를 레포마다 복사한다 | 경계 하나가 어긋나면 주문 거부나 상한가 오판이 생깁니다 | 표의 정본은 실제 주문을 내는 [kiwoom-client](https://github.com/younghwan91/kiwoom-client) 하나에 두고 여기서는 파생 연산만 합니다 |
+| 종목코드를 숫자로 다룬다 | 알파벳이 들어간 신규 코드 `0155E0`을 숫자만 남겨 정규화하면 전혀 다른 회사 코드가 됩니다 | `normalize_code("0155E0")`는 `0155E0`을 그대로 유지하고 `normalize_code("5930")`은 `005930`을 돌려줍니다 |
+
+**적용 범위와 출처를 함께 밝힙니다.**
+
+- 호가단위 표는 2023-01-25 호가가격단위 개편(KOSPI·KOSDAQ·KONEX 통합) 이후 표입니다. 그 이전 KOSDAQ 저가 구간은 표가 달라 2023-01-25 이전 데이터에는 맞지 않습니다. 출처는 KRX 개편 안내와 증권사 공지입니다(`kiwoom_client.tick_size` docstring).
+- 가격제한폭은 2015-06-15 이후 ±30% 규칙입니다. 권리락·신규상장처럼 기준가가 전일종가가 아닌 날은 호출부가 기준가를 넘겨야 합니다.
+- 2026-01-01 세율 인상은 기획재정부 증권거래세법 시행령 개정 보도로 확인했습니다. 그 이전 단계는 2차 출처이고 법령 원문(law.go.kr)과는 아직 대조하지 않았습니다. KONEX 세율은 확인하지 못해 KOSDAQ과 같게 두었습니다([거래세 표](docs/guide.md#거래세-스케줄-매도-시)).
+
 ## 무엇이 들어 있나
 
 | 모듈 | 하는 일 |
@@ -90,6 +109,15 @@ pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@
 - **누락된 하한가**: 하한가 계산이 없었고, 대칭식으로 짜면 실제 가격과 어긋납니다.
 
 핵심 원칙은 네 가지입니다. 포트는 원본과 **수치 동일성**을 대조했고, 통계 함수는 **수치만 반환**(판정 금지)하며, 미검증 브로커 필드는 **`False` 플래그로 명시**하고, 공유 앱키의 **토큰 폐기를 금지**합니다.
+
+## 같이 쓰면 좋은 것
+
+| 레포 | 하는 일 |
+|---|---|
+| [kiwoom-client](https://github.com/younghwan91/kiwoom-client) | 키움 REST API 파이썬 클라이언트입니다. 엔드포인트 182개·실시간 WebSocket·MCP 서버를 지원하고, 이 패키지가 쓰는 호가단위 표의 정본이 있습니다 |
+| [krx-news-client](https://github.com/younghwan91/krx-news-client) | DART 공시와 토스증권 뉴스를 한 스키마로 받는 한국 주식 뉴스·공시 클라이언트입니다 |
+| [kiwoom-order-guard](https://github.com/younghwan91/kiwoom-order-guard) | AI 에이전트가 키움 MCP·플러그인으로 내는 주문을 전송 전에 검사하는 Claude Code 훅입니다 |
+| [fin-checkup](https://github.com/younghwan91/fin-checkup) | 상장사 재무제표 지표 17개를 계산식·경계값과 함께 신호등으로 보여 줍니다. 측정값만 다루며 투자권유가 아닙니다 |
 
 ## 문서
 
