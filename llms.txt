@@ -1,0 +1,32 @@
+# krx-quant-core
+
+> Shared core for Korean equity (KOSPI/KOSDAQ) quant systems: KRX tick sizes, asymmetric price limits (upper/lower limit), session and trading calendar, effective-date transaction-tax and cost models, order guards, DART disclosure risk classification, fill simulation, validation statistics (Deflated/Probabilistic Sharpe, purged walk-forward, bootstrap), a column-wise mmap data layer, and sweep/evolution search. No strategies are included.
+
+Install `pip install krx-quant-core` (extras `[fast]` numba, `[opt]` optuna, `[db]` psycopg, `[evo]` cmaes), Python 3.11+, import name `krx_quant_core`. Consumers pin the exact version.
+
+Rules for writing code against this library:
+
+- Upper and lower limit prices are **not symmetric**: use `limit_up_price(base)` / `limit_down_price(base)` from `krx_quant_core.market`, never `base * 1.3` or `base * 0.7`.
+- Moving by ticks across a price band: `shift_ticks(49_950, 2)` gives 50100, not "price + n * current tick".
+- The sell tax differs by date: `tax_rate(date, Market.KOSPI).total` and `round_trip_cost(date, market, slippage_one_way=...)` take the trade date. Do not use one constant rate.
+- Stock codes can contain letters (`0155E0`). Use `normalize_code` (`"5930"` becomes `"005930"`); do not strip to digits.
+- Statistics functions return numbers only, never pass/fail verdicts. Thresholds belong to the caller's pre-registration.
+- The out-of-sample window is opened once per label by the run ledger (`runtime`); retries are refused. Do not work around it.
+- The tick-size table's source of truth is kiwoom-client; this package only derives operations from it.
+- Results are identical with or without numba (`KRX_QUANT_CORE_DISABLE_NUMBA=1` forces the Python path).
+- Modules: `market`, `costs`, `execution`, `risk`, `backtest` (incl. `backtest.lob`), `data`, `stats`, `portfolio`, `research`, `runtime` (`kqc` CLI).
+
+## Docs
+
+- [README (한국어)](https://raw.githubusercontent.com/younghwan91/krx-quant-core/main/README.md): quick start, module table, the pitfalls it removes, consumers
+- [README (English)](https://raw.githubusercontent.com/younghwan91/krx-quant-core/main/README.en.md): the same, in English
+- [Guide (한국어)](https://raw.githubusercontent.com/younghwan91/krx-quant-core/main/docs/guide.md): measured price limits, tax schedule, run ledger and OOS lock, live-trading safety rules, LOB fill assumptions, edge tests, data layer, sweep and evolution, development, roadmap
+- [Guide (English)](https://raw.githubusercontent.com/younghwan91/krx-quant-core/main/docs/guide.en.md): the same, in English
+
+## Optional
+
+- [CONTRIBUTING](https://raw.githubusercontent.com/younghwan91/krx-quant-core/main/CONTRIBUTING.md): dev setup, tests, commit convention
+- [PyPI](https://pypi.org/project/krx-quant-core/): releases
+- [Sibling: kiwoom-client](https://github.com/younghwan91/kiwoom-client): Kiwoom REST API client, source of the tick-size table
+- [Sibling: krx-news-client](https://github.com/younghwan91/krx-news-client): DART filings and Toss news in one schema
+- [Sibling: kiwoom-order-guard](https://github.com/younghwan91/kiwoom-order-guard): Claude Code hook that checks AI-agent orders before they are sent
