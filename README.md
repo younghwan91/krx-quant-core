@@ -131,7 +131,7 @@ pip install "krx-quant-core @ git+https://github.com/younghwan91/krx-quant-core@
 ## 기여 및 지원
 
 - 버그 제보, 질문, 기능 제안은 [GitHub Issues](https://github.com/younghwan91/krx-quant-core/issues)에 남겨 주세요.
-- 개발 환경 설정과 테스트 명령은 [상세 가이드의 개발 절](docs/guide.md#개발)을 참고하세요.
+- 개발 환경·테스트·커밋 규칙은 [CONTRIBUTING.md](CONTRIBUTING.md), 처음이라면 [good first issue](https://github.com/younghwan91/krx-quant-core/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)부터 보세요. 명령 상세는 [가이드의 개발 절](docs/guide.md#개발)에 있습니다.
 - **만든 사람**: **채영환 (Younghwan Chae)** · [GitHub @younghwan91](https://github.com/younghwan91) · [LinkedIn](https://www.linkedin.com/in/younghwan-chae/)
 
 ## 라이선스
