@@ -115,3 +115,12 @@ def test_near_limit_up_ticks_and_guards():
     assert not near_limit_up(12_970, 10_000, 2)
     assert not near_limit_up(0, 10_000)
     assert not near_limit_up(12_990, 0)
+
+
+def test_module_docstring_example_matches_behavior():
+    """모듈 docstring 의 239,000 → 167,500 예시가 실제 동작과 어긋나지 않게 묶는다."""
+    from krx_quant_core.market import limits
+
+    assert limit_down_price(239_000) == 167_500
+    assert "239,000" in limits.__doc__ and "167,500" in limits.__doc__
+    assert "올림" in limits.__doc__ and "대칭이 **아니다**" in limits.__doc__
