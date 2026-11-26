@@ -78,6 +78,9 @@ kqc nightly status --days 7                      # 최근 레포×job 결과표.
 kqc pins                                         # 소비 레포가 핀한 코어 버전 표. 뒤처진 레포가 있으면 exit 1
 ```
 
+- 크론 로그(`data/nightly.log` 등)는 이어 붙이는 파일이라 `tail` 의 `FAILED` 줄이 오늘 것이라는 보장이 없다. 실패
+  여부는 `kqc nightly status` 로 본다. `kqc nightly` 의 출력 줄은 줄마다 실행 날짜로 시작한다.
+
 ## 같은 전략, 실매매와 리플레이 (`execution` + `backtest.replay`)
 
 `Strategy`(`on_start`/`on_event`/`on_end`)는 `StrategyContext.oms` 만 보고 어디서 체결되는지 모른다. 브로커만 바뀐다 —

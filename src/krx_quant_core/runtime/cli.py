@@ -28,6 +28,8 @@ import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from krx_quant_core.market.session import now_kst
+
 from . import oos, runindex
 from .gitstate import validate_label
 from .host import BACKTEST_HOST
@@ -161,17 +163,22 @@ def _cmd_prereg_lock(a: argparse.Namespace) -> int:
 def _cmd_nightly(a: argparse.Namespace) -> int:
     if a.repo_root == "status":
         return _cmd_nightly_status(a)
-    results = run_nightly(a.repo_root, only=a.only, dry_run=a.dry_run)
+    # 날짜를 한 번 정해 run_nightly 와 출력 줄에 같이 쓴다. cron 은 이 출력을 날짜 없는 파일에
+    # 이어 붙인다 — 날짜가 없으면 `tail` 에 보이는 2주 전 FAILED 줄이 어젯밤 실패로 읽힌다
+    # (2026-11-27: 11-09 DB 장애 한 번이 "매일 실패"로 보고됐다).
+    today = now_kst().date()
+    day = today.isoformat()
+    results = run_nightly(a.repo_root, only=a.only, dry_run=a.dry_run, today=today)
     failed: list[str] = []
     for r in results:
         status = r.skipped or ("timeout" if r.timed_out else "ok" if r.rc == 0 else f"rc={r.rc}")
-        print(f"{r.name:20}  {status:10}  {r.secs:8.1f}s")
+        print(f"{day}  {r.name:20}  {status:10}  {r.secs:8.1f}s")
         if r.skipped is None and (r.timed_out or r.rc != 0):
             failed.append(f"{r.name}({status})")
     if failed:
         # cron 로그에서 grep 한 줄로 잡히게 — 요약 JSON 만 보고는 아무도 실패를 못 봤다.
         repo = Path(a.repo_root).resolve().name
-        print(f"kqc nightly: {repo} FAILED {' '.join(failed)}", file=sys.stderr)
+        print(f"{day}  kqc nightly: {repo} FAILED {' '.join(failed)}", file=sys.stderr)
     return min(len(failed), 1)
 
 
