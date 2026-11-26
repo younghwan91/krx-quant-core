@@ -139,3 +139,29 @@ def test_nightly_prints_failed_line_to_stderr(tmp_path, monkeypatch, capsys):
     assert cli.main(["nightly", str(repo)]) == 1
     err = capsys.readouterr().err
     assert "kqc nightly: myrepo FAILED bad(rc=1)" in err
+
+
+def test_nightly_output_lines_carry_the_run_date(tmp_path, monkeypatch, capsys):
+    """cron 은 출력을 날짜 없는 로그에 이어 붙인다.
+
+    줄마다 날짜가 없으면 옛 FAILED 가 오늘 것으로 읽힌다(2026-11-27).
+    """
+    import datetime as dt
+
+    monkeypatch.setattr("krx_quant_core.runtime.host.socket.gethostname", lambda: "simnode")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    fixed = dt.datetime(2026, 11, 9, 18, 30)
+    monkeypatch.setattr(cli, "now_kst", lambda: fixed)
+    repo = tmp_path / "myrepo"
+    (repo / "research").mkdir(parents=True)
+    (repo / "research" / "nightly.toml").write_text(
+        '[[job]]\nname = "bad"\ncmd = ["false"]\nweekdays_only = false\n'
+        '[[job]]\nname = "good"\ncmd = ["true"]\nweekdays_only = false\n'
+    )
+    assert cli.main(["nightly", str(repo)]) == 1  # 실제 실패는 여전히 exit 1
+    cap = capsys.readouterr()
+    rows = [ln for ln in cap.out.splitlines() if ln.strip()]
+    assert len(rows) == 2 and all(ln.startswith("2026-11-09  ") for ln in rows)
+    assert cap.err.startswith("2026-11-09  kqc nightly: myrepo FAILED bad(rc=1)")
+    # 요약 JSON 도 같은 날짜 디렉터리에 남는다(출력 날짜와 어긋나지 않게).
+    assert (tmp_path / ".kqc" / "nightly" / "2026-11-09" / "myrepo.json").is_file()
